@@ -1,0 +1,40 @@
+[project]
+name = "sms"
+version = "0.1.0"
+description = "School management system backend — a vehicle for agentic-harness/TDD practice, see README."
+readme = "README.md"
+authors = [
+    { name = "andoh", email = "solomonkingsman@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.19.1",
+    "argon2-cffi>=25.1.0",
+    "asyncpg>=0.31.0",
+    "fastapi[standard]>=0.141.1",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.13.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "structlog>=26.1.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# test_engine (conftest.py) is session-scoped so its connection pool is
+# reused across tests; without a matching session-scoped event loop, a
+# second test running on a fresh per-test loop hits "Future attached to a
+# different loop" against connections opened on the first test's loop.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
