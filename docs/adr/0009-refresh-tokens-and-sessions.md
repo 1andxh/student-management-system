@@ -1,0 +1,32 @@
+# 0009. Refresh tokens and sessions
+
+## Status
+Accepted
+
+## Context
+ADR 0008's Finding 4 flagged that access tokens have no server-side revocation — a compromised token, or a user who wants to log out, has no way to invalidate a token before it naturally expires. Solomon raised this directly as a follow-up, proposing a refresh-token/session mechanism and asking specifically whether a separate orchestrating class between auth/session/refresh made sense, and whether `user_agent`/`ip_address` belonged on the session record.
+
+## Decision
+- **`Session` is the aggregate, not a bare `RefreshToken` list.** One row per logged-in device/browser (`src/sms/domains/auth/models.py`), holding the *current* refresh token for that session rather than a history of every token ever issued.
+- **Opaque random secret, not a JWT.** `generate_refresh_token()` (`src/sms/core/security.py`) uses `secrets.token_urlsafe(32)` — this is what makes a session actually revocable; a JWT refresh token would just push the "can't invalidate early" problem down one layer. Stored as `refresh_token_hash` (plain SHA-256 via `hash_token()`, deliberately *not* Argon2 — the input already has ~256 bits of entropy, so a slow KDF meant for low-entropy human passwords buys nothing and only adds latency).
+- **Absolute expiry (`refresh_token_expire_days`, default 30), not sliding.** A session dies a fixed time after creation regardless of activity, rather than extending indefinitely on each refresh — bounds how long a compromised device stays trusted, which matters more than usual for a system plausibly handling minors' data.
+- **Rotation on every refresh, no reuse history.** `AuthService.refresh()` issues a brand-new raw token and overwrites `refresh_token_hash` in place; the old token simply stops matching anything. Explicitly *not* building reuse-detection (keeping a chain of rotated-away tokens to flag a stolen-token replay) — real OWASP-recommended hardening, but more complexity than this project's threat model (not internet-facing, no public client) currently justifies. Noted for later, not built preemptively — same posture as ADR 0008's other deferred items.
+- **`AuthService` stays one class, not split into a separate session/token orchestrator.** Login, refresh, and logout all touch the same two tables (`User`, `Session`) and share failure modes; splitting them into collaborating service classes would add a layer to trace through without a clear boundary. Rejected explicitly, not by default.
+- **`user_agent`/`ip_address` are captured, not acted on.** No anomaly detection, no "list your sessions" UI yet — but both are cheap to record now and cannot be backfilled onto sessions created before the columns existed, so they're captured from the start even though nothing reads them yet. `_client_metadata()` (`src/sms/domains/auth/router.py`) extracts them from the request and threads them through `login`/`refresh` into the `Session` row.
+- **Uniform error handling, matching the ADR 0008 login-oracle fix.** `InvalidRefreshTokenError` is raised identically whether a token is unknown, expired, revoked, *or belongs to a deactivated user* (`AuthService.refresh`) — distinguishing any of these would leak account/session state to an unauthenticated caller, the same reasoning as collapsing login's failure messages.
+- **`logout()` is idempotent.** An unknown or already-revoked token is a no-op, not an error — consistent with treating logout as "ensure this session is not active" rather than "this specific token must currently be valid."
+
+### Security review (post-implementation)
+A `security-auditor` pass (same process as ADR 0008) found and fixed 4 real issues before this stage was called done, none carrying a genuine tradeoff so applied directly rather than brought as questions:
+- **Rotation had a TOCTOU race** — a plain read-then-write let two concurrent `refresh()` calls on the same token both pass validation. Fixed via an atomic conditional `UPDATE ... WHERE refresh_token_hash = :old_hash` (`SessionRepository.rotate`) instead of load-mutate-save; the loser of the race now gets the same `InvalidRefreshTokenError` as any other invalid token, not a token that's dead on arrival.
+- **`refresh()` never checked `user.is_active`** — inconsistent with `login()`'s own established check, and itself an oracle: a deactivated user's still-valid refresh token would keep minting access tokens until it separately failed at `get_current_user`, letting an attacker distinguish "deactivated" from "session revoked." Fixed — `refresh()` now re-loads and checks the user, same error either way.
+- **`user_agent`/`ip_address` were documented as captured but never actually populated anywhere.** Fixed by threading `Request` through the login/refresh handlers.
+- **No rate limit on `/auth/refresh`/`/auth/logout`**, inconsistent with `/auth/login`'s posture. Added `20/minute` to both — high enough not to bother a legitimate client, low enough to blunt volumetric abuse.
+
+The review independently proposed refresh-token reuse/theft detection (a rotation-chain history that can flag a stolen-token replay and revoke the whole session family) — this is exactly what this ADR already deferred above. The review reaching the same conclusion independently is treated as confirmation the deferral is still the right call, not a new decision to act on.
+
+## Consequences
+- `TokenResponse` now always includes `refresh_token` — any client integration built against the old (access-token-only) shape needs updating. There is no current client, so this has no live blast radius yet, but it's a breaking response-shape change to be aware of.
+- Refresh-token reuse detection remains a known, deliberate gap, now confirmed twice (once at design time, once independently by security review) — if this project's threat model ever changes (public client, internet-facing), revisit this ADR rather than silently bolting on a partial fix.
+- Any future rate-limited or state-bearing route needs the same test-isolation awareness already established for the rate limiter (`tests/conftest.py`'s `_reset_rate_limiter`) — sessions themselves are DB-backed and already covered by the SAVEPOINT rollback, so no new isolation fixture was needed here.
+- `SessionRepository.rotate()` is the only place a `Session`'s `refresh_token_hash` should ever be updated after creation — mutating a fetched `Session` object's hash directly and calling `add()` would reintroduce the TOCTOU race this ADR just closed.
