@@ -8,8 +8,22 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from sms.core.config import settings
+from sms.core.rate_limit import limiter
+from sms.core.security import create_access_token, hash_password
 from sms.db.session import get_db
+from sms.domains.auth.models import User, UserRole
 from sms.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter() -> None:
+    """limiter (sms.core.rate_limit) is a module-level singleton, so its
+    in-memory counters persist across tests even though `client` builds a
+    fresh app each time — without this, tests hitting a rate-limited route
+    from the same synthetic client IP would silently accumulate against one
+    shared bucket instead of being independent. Same isolation principle as
+    db_session's SAVEPOINT rollback, applied to in-memory state instead."""
+    limiter.reset()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -66,3 +80,45 @@ async def client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def make_user(db_session: AsyncSession):
+    """Factory fixture, shared across domains' tests: returns an async
+    callable that inserts a User directly via the session (bypassing the
+    auth service/router), so tests for *other* endpoints can set up an
+    authenticated actor without depending on auth's own HTTP surface.
+    db_session is captured here rather than passed at each call site.
+    hashed_password defaults to a real argon2 hash of "password123" so
+    login flows can authenticate against it; pass hashed_password=...
+    directly to override with a pre-hashed value instead of a plaintext
+    one."""
+
+    async def _make_user(**overrides: object) -> User:
+        defaults: dict[str, object] = {
+            "email": "user@example.com",
+            "hashed_password": hash_password("password123"),
+            "role": UserRole.ADMIN,
+            "is_active": True,
+        }
+        defaults.update(overrides)
+        user = User(**defaults)
+        db_session.add(user)
+        await db_session.commit()
+        await db_session.refresh(user)
+        return user
+
+    return _make_user
+
+
+@pytest.fixture
+def auth_headers():
+    """Factory fixture: returns a callable that builds the bearer-token
+    header for a given user, for use against endpoints protected by
+    get_current_user/require_role."""
+
+    def _auth_headers(user: User) -> dict[str, str]:
+        token = create_access_token(user.id)
+        return {"Authorization": f"Bearer {token}"}
+
+    return _auth_headers
