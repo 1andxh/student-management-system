@@ -1,0 +1,28 @@
+# Working on sms
+
+This file is project-specific — it supplements, not replaces, `~/.claude/CLAUDE.md`. See `README.md` for what this project actually is: agentic-harness/orchestration practice, with the school-management domain as the vehicle. That framing matters here more than in a typical project — sloppy process *is* the failure, not just a side effect.
+
+## Orchestration guardrails (you are the orchestrator here)
+
+- **Every `Agent` tool call goes through `agent-relay`** — log to `THINKING.md`/`LIVE.md` before and after, no exceptions. These files are gitignored; they're a live transcript for Solomon, not a deliverable.
+- **Run the `agent-team` gate check before delegating, every time** — don't delegate work that's tightly-coupled, first-of-its-kind, or small enough that writing the contract costs more than doing it. A real example from this project: Stage 1/2's domain implementation stayed in the main thread; only test-writing against an already-settled contract was delegated. Don't force multi-agent patterns onto something that doesn't need them just to look like the harness is being used — that's the opposite of the point.
+- **The established TDD-delegation shape**: fully settle the contract yourself first (models, schemas, service method signatures, exceptions, route shapes) — write it out in full, don't hand-wave it — then dispatch `qa-engineer` to write tests against that contract while implementing in the main thread *in parallel*, not sequentially. Confirm genuine red state before implementing (the subagent should actually run the tests and paste real output, not assert it would fail).
+- **`security-auditor` reviews any change touching auth, sessions, secrets, or RBAC before that stage is called done** — not optional, not just for the initial auth stage. Give it a neutral brief; don't pre-flag your own suspicions, the value is its independence.
+- **Re-check file-overlap assumptions mid-flight, not just at dispatch.** "Our paths don't overlap, no worktree isolation needed" is only true as of the moment you decided it — if something (e.g. a mid-task user request) pulls you into a file a running subagent still owns, that assumption is broken. Either wait for its completion notification or use `isolation: "worktree"`. This bit us once already (Stage 2) — see `docs/adr/0007`.
+- **Update `docs/adr/` proactively at the end of every stage, before reporting it done** — not just for decisions made during planning, but ones that emerged during implementation (a business-logic pattern meant as precedent for future domains, a non-obvious bug fix someone could mistake for unnecessary complexity and revert). Ask explicitly: did anything get settled here that a future session shouldn't silently undo?
+- **Bring tradeoffs as questions, not silent choices**, whenever a fix has a real downside (UX cost, new dependency, scope expansion) — apply fixes with no real tradeoff directly. `docs/adr/0008` is the reference example of both halves of this done right in one pass.
+
+## Dev workflow specifics (environment quirks, not preferences)
+
+- **Everything runs in Docker via WSL** — `wsl -d Ubuntu -e bash -lc "cd /mnt/c/Users/sando/Documents/sms && docker compose <cmd>"`. Host-port-publishing from WSL2 Docker to Windows is flaky on this machine (works sometimes, breaks after rebuilds) — don't burn time re-diagnosing it, and don't assume `localhost` resolves reachably from Windows even when `127.0.0.1` does (IPv6 vs IPv4 resolution quirk, not a project bug).
+- **`docker compose exec api uv run <cmd>`** for one-off commands (pytest, alembic). The image is `COPY`-based, not bind-mounted (except `alembic/versions/`, deliberately, so generated migrations land on the host) — `docker compose up -d --build` after any source change, or the container runs stale code.
+- **`ALEMBIC_TARGET=test|dev`** is the single explicit switch for which database a migration touches — never rely on an implicit default when running Alembic manually. See `docs/adr/0003`.
+- **Test isolation has two axes now, not one**: `db_session`'s SAVEPOINT rollback handles Postgres state; `_reset_rate_limiter` (autouse, `tests/conftest.py`) handles in-memory rate-limiter state. Any new form of shared/global state introduced later (another module-level singleton, a cache) needs the same treatment — check for this before assuming a new test is independent.
+- **Test layout**: `tests/domains/<name>/unit/` (fake in-memory repository, no DB) and `tests/domains/<name>/integration/` (real Postgres via `db-test`, through HTTP). Every directory needs `__init__.py` — multiple domains have same-named test files, and pytest can't disambiguate them without proper package qualification. See `docs/adr/0007`.
+- **Shared test setup lives in `tests/conftest.py` as factory fixtures** (`make_user`, `auth_headers`, ...), not plain importable functions — pytest auto-discovers fixtures, no cross-file imports needed. A helper only one domain's tests use stays local to that domain's test file until a second domain needs it.
+
+## Conventions already settled — check `docs/adr/` before re-deciding
+
+Numbered ADRs are the durable record of *why* things are the way they are: domain-oriented architecture + repository pattern (0002), auth domain boundaries (0006), the create/uniqueness-race pattern every domain's `create()` should follow (0004), security review findings and what's deliberately deferred (0008). Read the relevant ones before proposing a structural change — if a pattern here looks like it could be simplified, it was probably already discussed once.
+
+Git: split commits (one file each, matching Solomon's global convention), short headline, `Co-Authored-By` trailer. Never commit or push without being asked.
