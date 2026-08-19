@@ -21,6 +21,7 @@ if config.config_file_name is not None:
 # tables for autogenerate — added one line per domain as each is built.
 from sms.core.config import settings
 from sms.db.base import Base
+from sms.domains.auth import models as auth_models  # noqa: F401
 from sms.domains.students import models as students_models  # noqa: F401
 
 target_metadata = Base.metadata
