@@ -4,16 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sms.core.rate_limit import limiter
 from sms.db.session import get_db
 from sms.domains.auth.dependencies import get_current_user
-from sms.domains.auth.models import User
-from sms.domains.auth.repository import SessionRepository, UserRepository
-from sms.domains.auth.schemas import (
-    LoginRequest,
-    LogoutRequest,
-    RefreshRequest,
-    TokenResponse,
-    UserRead,
-)
+from sms.domains.auth.repository import SessionRepository
+from sms.domains.auth.schemas import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
 from sms.domains.auth.service import AuthService
+from sms.domains.users.models import User
+from sms.domains.users.repository import UserRepository
+from sms.domains.users.schemas import UserRead
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
