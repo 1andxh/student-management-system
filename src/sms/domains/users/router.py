@@ -1,8 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.pagination import Pagination, pagination_params
 from sms.core.rate_limit import limiter
 from sms.db.session import get_db
 from sms.domains.audit.repository import AuditLogRepository
@@ -39,9 +40,14 @@ async def create_user(
 @router.get("", response_model=list[UserRead], dependencies=[Depends(_admin_only)])
 @limiter.limit("30/minute")
 async def list_users(
-    request: Request, service: UserService = Depends(get_user_service)
+    request: Request,
+    response: Response,
+    pagination: Pagination = Depends(pagination_params),
+    service: UserService = Depends(get_user_service),
 ) -> list[User]:
-    return await service.list()
+    items, total = await service.list(limit=pagination.limit, offset=pagination.offset)
+    response.headers["X-Total-Count"] = str(total)
+    return items
 
 
 @router.get("/{user_id}", response_model=UserRead, dependencies=[Depends(_admin_only)])
