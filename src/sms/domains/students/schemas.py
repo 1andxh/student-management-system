@@ -17,7 +17,7 @@ class StudentBase(BaseModel):
 
 
 class StudentCreate(StudentBase):
-    pass
+    user_id: UUID | None = None
 
 
 class StudentUpdate(BaseModel):
@@ -29,12 +29,14 @@ class StudentUpdate(BaseModel):
     guardian_name: str | None = None
     guardian_phone: str | None = None
     enrollment_status: EnrollmentStatus | None = None
+    user_id: UUID | None = None
 
 
 class StudentRead(StudentBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    user_id: UUID | None
     enrollment_status: EnrollmentStatus
     created_at: datetime
     updated_at: datetime
