@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.pagination import paginate
 from sms.core.repository import AbstractRepository
 from sms.domains.audit.models import AuditLog
 
@@ -30,12 +31,14 @@ class AuditLogRepository(AbstractRepository[AuditLog]):
     async def get(self, entity_id: UUID) -> AuditLog | None:
         return await self._session.get(AuditLog, entity_id)
 
-    async def list(self) -> list[AuditLog]:
-        # Unordered, matching every other repository's list() in this
-        # codebase — sorting is a service/consumer concern, not the
-        # repository's. See AuditService.list_all().
-        result = await self._session.execute(select(AuditLog))
-        return list(result.scalars().all())
+    async def list(self, *, limit: int, offset: int) -> tuple[list[AuditLog], int]:
+        # Ordering moved here from AuditService.list_all()'s Python-side
+        # sorted() — a genuine reason to revisit that ADR 0011 decision,
+        # not a silent reversal: pagination requires the DB to order
+        # before slicing, since a page can't be correctly sliced and then
+        # separately re-sorted client-side. See docs/adr/0020.
+        query = select(AuditLog).order_by(AuditLog.created_at.desc())
+        return await paginate(self._session, query, limit=limit, offset=offset)
 
     async def remove(self, entity: AuditLog) -> None:
         await self._session.delete(entity)
