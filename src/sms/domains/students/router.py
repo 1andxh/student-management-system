@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.db.session import get_db
 from sms.domains.auth.dependencies import get_current_user, require_role
-from sms.domains.auth.models import UserRole
+from sms.domains.users.models import UserRole
 from sms.domains.students.models import Student
 from sms.domains.students.repository import StudentRepository
 from sms.domains.students.schemas import StudentCreate, StudentRead, StudentUpdate
