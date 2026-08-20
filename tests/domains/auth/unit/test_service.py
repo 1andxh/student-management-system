@@ -6,9 +6,10 @@ import pytest
 from sms.core.repository import AbstractRepository
 from sms.core.security import hash_password, hash_token
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
-from sms.domains.auth.models import Session, User, UserRole
+from sms.domains.auth.models import Session
 from sms.domains.auth.schemas import LoginRequest, TokenResponse
 from sms.domains.auth.service import AuthService
+from sms.domains.users.models import User, UserRole
 
 
 class FakeUserRepository(AbstractRepository[User]):
@@ -21,11 +22,20 @@ class FakeUserRepository(AbstractRepository[User]):
     def __init__(self) -> None:
         self._users: dict[UUID, User] = {}
 
-    async def add(self, entity: User) -> User:
+    async def add(self, entity: User, *, commit: bool = True) -> User:
+        # commit is accepted but irrelevant here — there's no real
+        # transaction to defer, this just matches the real
+        # UserRepository.add's signature. See docs/adr/0011.
         if entity.id is None:
             entity.id = uuid4()
         self._users[entity.id] = entity
         return entity
+
+    async def commit(self) -> None:
+        pass
+
+    async def rollback(self) -> None:
+        pass
 
     async def get(self, entity_id: UUID) -> User | None:
         return self._users.get(entity_id)
@@ -41,6 +51,13 @@ class FakeUserRepository(AbstractRepository[User]):
             if user.email == email:
                 return user
         return None
+
+    async def count_active_super_admins(self) -> int:
+        return sum(
+            1
+            for user in self._users.values()
+            if user.role == UserRole.SUPER_ADMIN and user.is_active
+        )
 
 
 class FakeSessionRepository(AbstractRepository[Session]):
@@ -122,9 +139,6 @@ def session_repository() -> FakeSessionRepository:
 def service(
     repository: FakeUserRepository, session_repository: FakeSessionRepository
 ) -> AuthService:
-    # login() now also creates a Session (see sms.domains.auth.service),
-    # so every service instance needs both repositories wired even for
-    # tests that only exercise the pre-existing login/credentials paths.
     return AuthService(repository, session_repository)
 
 
