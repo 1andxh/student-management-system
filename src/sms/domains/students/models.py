@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from enum import Enum
 
-from sqlalchemy import CheckConstraint, Date, DateTime, String, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -22,11 +22,21 @@ class Student(Base):
     __table_args__ = (
         UniqueConstraint("student_number", name="uq_students_student_number"),
         UniqueConstraint("email", name="uq_students_email"),
+        UniqueConstraint("user_id", name="uq_students_user_id"),
         CheckConstraint("date_of_birth <= CURRENT_DATE", name="ck_students_dob_not_future"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # Same shape and reasoning as Teacher.user_id (docs/adr/0013): SET NULL,
+    # nullable — a Student can exist with no linked login, and the record
+    # should outlive the login account if it's ever removed. Added in
+    # Stage 7 specifically to support "a student sees only their own
+    # grades" (docs/adr/0018) — Student predates auth/users entirely
+    # (Stage 1), so this link never existed until it was actually needed.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     student_number: Mapped[str] = mapped_column(String, nullable=False)
     first_name: Mapped[str] = mapped_column(String, nullable=False)
