@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,27 +12,42 @@ from sms.domains.students.models import Student
 from sms.domains.students.schemas import StudentCreate, StudentUpdate
 from sms.domains.students.service import StudentService
 
+# Arbitrary fixed epoch — only used as a base for the fake's deterministic,
+# monotonically increasing created_at stamps (see FakeStudentRepository.add),
+# same pattern as tests/domains/audit/unit/test_service.py's _EPOCH.
+_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
 
 class FakeStudentRepository(AbstractRepository[Student]):
     """In-memory stand-in for StudentRepository, backed by a plain dict.
     Implements the full AbstractRepository contract plus the two
     domain-specific lookups so StudentService can be unit tested without a
-    database."""
+    database. list() mirrors the real repository's pagination contract:
+    sorted newest-first by created_at, sliced by limit/offset, returning
+    (items, total) — total reflects the full filtered set, not just the
+    slice."""
 
     def __init__(self) -> None:
         self._students: dict[UUID, Student] = {}
+        self._sequence = 0
 
     async def add(self, entity: Student) -> Student:
         if entity.id is None:
             entity.id = uuid4()
+        if entity.created_at is None:
+            self._sequence += 1
+            entity.created_at = _EPOCH + timedelta(microseconds=self._sequence)
         self._students[entity.id] = entity
         return entity
 
     async def get(self, entity_id: UUID) -> Student | None:
         return self._students.get(entity_id)
 
-    async def list(self) -> list[Student]:
-        return list(self._students.values())
+    async def list(self, *, limit: int = 50, offset: int = 0) -> tuple[list[Student], int]:
+        all_students = sorted(
+            self._students.values(), key=lambda s: s.created_at, reverse=True
+        )
+        return all_students[offset : offset + limit], len(all_students)
 
     async def remove(self, entity: Student) -> None:
         self._students.pop(entity.id, None)
@@ -123,10 +138,56 @@ async def test_list(service: StudentService) -> None:
     await service.create(make_student_create(student_number="S-0001", email="a@example.com"))
     await service.create(make_student_create(student_number="S-0002", email="b@example.com"))
 
-    students = await service.list()
+    students, total = await service.list(limit=50, offset=0)
 
     assert len(students) == 2
+    assert total == 2
     assert {s.student_number for s in students} == {"S-0001", "S-0002"}
+
+
+async def test_list_pagination_slices_and_reports_total(service: StudentService) -> None:
+    for i in range(5):
+        await service.create(
+            make_student_create(student_number=f"S-{i:04d}", email=f"s{i}@example.com")
+        )
+
+    page, total = await service.list(limit=2, offset=0)
+
+    assert len(page) == 2
+    assert total == 5
+
+
+async def test_list_pagination_offset_skips_correctly(service: StudentService) -> None:
+    created = [
+        await service.create(
+            make_student_create(student_number=f"S-{i:04d}", email=f"off{i}@example.com")
+        )
+        for i in range(5)
+    ]
+    # newest-first: index 4 (last created) is first in the full ordering.
+    expected_full_order_ids = [s.id for s in reversed(created)]
+
+    page, total = await service.list(limit=2, offset=2)
+
+    assert total == 5
+    assert [s.id for s in page] == expected_full_order_ids[2:4]
+
+
+async def test_list_newest_first_ordering(service: StudentService) -> None:
+    first = await service.create(
+        make_student_create(student_number="S-ORD-1", email="ord1@example.com")
+    )
+    second = await service.create(
+        make_student_create(student_number="S-ORD-2", email="ord2@example.com")
+    )
+    third = await service.create(
+        make_student_create(student_number="S-ORD-3", email="ord3@example.com")
+    )
+
+    page, total = await service.list(limit=50, offset=0)
+
+    assert total == 3
+    assert [s.id for s in page] == [third.id, second.id, first.id]
 
 
 async def test_update_success(service: StudentService) -> None:

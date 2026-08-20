@@ -137,6 +137,24 @@ async def test_get_users_list(
     assert str(created.id) in {u["id"] for u in body}
 
 
+async def test_get_users_list_pagination_smoke(
+    client: AsyncClient,
+    make_user: Callable[..., Awaitable[User]],
+    make_role_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    for i in range(3):
+        await make_user(email=f"pgsmoke{i}@example.com")
+    headers = await make_role_headers(email="admin-pg-smoke@example.com")
+
+    response = await client.get("/users", params={"limit": 2, "offset": 0}, headers=headers)
+
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+    # Total includes the admin actor itself (created above the loop via
+    # make_role_headers), not just the 3 looped users.
+    assert int(response.headers["X-Total-Count"]) >= 3
+
+
 async def test_get_users_as_non_admin_returns_403(
     client: AsyncClient, make_role_headers: Callable[..., Awaitable[dict[str, str]]]
 ) -> None:

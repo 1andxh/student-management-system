@@ -1,5 +1,5 @@
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -253,6 +253,94 @@ async def test_delete_student_missing_returns_404(
 
     assert response.status_code == 404
     assert "detail" in response.json()
+
+
+async def test_get_students_list_pagination_slices_and_sets_total_count_header(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    for i in range(5):
+        await make_student(student_number=f"S-PG-{i:04d}", email=f"pg{i}@example.com")
+    headers = await make_manage_headers(email="admin-pg1@example.com")
+
+    response = await client.get("/students", params={"limit": 2, "offset": 0}, headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 2
+    assert response.headers["X-Total-Count"] == "5"
+
+
+async def test_get_students_list_pagination_offset_skips_correctly(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    # Explicit, distinguishable created_at per row — db_session wraps the
+    # whole test in one outer Postgres transaction (SAVEPOINT-based
+    # rollback, see conftest.py), and func.now()/CURRENT_TIMESTAMP is
+    # transaction-scoped, not statement-scoped, so every row inserted
+    # within a single test would otherwise get an identical server-default
+    # created_at, making the newest-first ordering nondeterministic among
+    # ties. Passing created_at explicitly is the same override any other
+    # constructor kwarg gets via make_student's **overrides.
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    created = [
+        await make_student(
+            student_number=f"S-OFF-{i:04d}",
+            email=f"off{i}@example.com",
+            created_at=base + timedelta(minutes=i),
+        )
+        for i in range(5)
+    ]
+    headers = await make_manage_headers(email="admin-pg2@example.com")
+
+    first_page = await client.get(
+        "/students", params={"limit": 2, "offset": 0}, headers=headers
+    )
+    second_page = await client.get(
+        "/students", params={"limit": 2, "offset": 2}, headers=headers
+    )
+
+    first_page_ids = {s["id"] for s in first_page.json()}
+    second_page_ids = {s["id"] for s in second_page.json()}
+    assert first_page_ids.isdisjoint(second_page_ids)
+    # newest-first: the most recently created students appear first, so
+    # offset=2 skips the two newest, landing on the middle two.
+    expected_full_order = [str(s.id) for s in reversed(created)]
+    assert [s["id"] for s in second_page.json()] == expected_full_order[2:4]
+
+
+async def test_get_students_list_newest_first_ordering(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    # Explicit, distinguishable created_at — see the offset test above for
+    # why (func.now() is transaction-scoped, and this whole test runs
+    # inside one outer transaction via db_session's SAVEPOINT isolation).
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    first = await make_student(
+        student_number="S-ORD-1", email="ordhttp1@example.com", created_at=base
+    )
+    second = await make_student(
+        student_number="S-ORD-2",
+        email="ordhttp2@example.com",
+        created_at=base + timedelta(minutes=1),
+    )
+    third = await make_student(
+        student_number="S-ORD-3",
+        email="ordhttp3@example.com",
+        created_at=base + timedelta(minutes=2),
+    )
+    headers = await make_manage_headers(email="admin-pg3@example.com")
+
+    response = await client.get("/students", headers=headers)
+
+    assert response.status_code == 200
+    ids = [s["id"] for s in response.json()]
+    assert ids.index(str(third.id)) < ids.index(str(second.id)) < ids.index(str(first.id))
 
 
 async def test_post_students_missing_required_field_returns_422(

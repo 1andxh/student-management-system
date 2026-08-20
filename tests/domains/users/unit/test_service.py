@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,16 +15,23 @@ from sms.domains.users.models import User, UserRole
 from sms.domains.users.schemas import UserCreate, UserUpdate
 from sms.domains.users.service import UserService
 
+# Arbitrary fixed epoch — only used as a base for the fake's deterministic,
+# monotonically increasing created_at stamps (see FakeUserRepository.add),
+# same pattern as tests/domains/audit/unit/test_service.py's _EPOCH.
+_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
 
 class FakeUserRepository(AbstractRepository[User]):
     """In-memory stand-in for UserRepository, backed by a plain dict. Same
     style as FakeStudentRepository in tests/domains/students/test_service.py
     — implements the full AbstractRepository contract plus the
     domain-specific get_by_email/count_active_super_admins lookups so
-    UserService can be unit tested without a database."""
+    UserService can be unit tested without a database. list() mirrors the
+    real repository's pagination contract."""
 
     def __init__(self) -> None:
         self._users: dict[UUID, User] = {}
+        self._sequence = 0
 
     async def add(self, entity: User, *, commit: bool = True) -> User:
         # commit is accepted but irrelevant here — there's no real
@@ -33,6 +41,9 @@ class FakeUserRepository(AbstractRepository[User]):
         # against this fake too. See docs/adr/0011.
         if entity.id is None:
             entity.id = uuid4()
+        if entity.created_at is None:
+            self._sequence += 1
+            entity.created_at = _EPOCH + timedelta(microseconds=self._sequence)
         self._users[entity.id] = entity
         return entity
 
@@ -45,8 +56,9 @@ class FakeUserRepository(AbstractRepository[User]):
     async def get(self, entity_id: UUID) -> User | None:
         return self._users.get(entity_id)
 
-    async def list(self) -> list[User]:
-        return list(self._users.values())
+    async def list(self, *, limit: int = 50, offset: int = 0) -> tuple[list[User], int]:
+        all_users = sorted(self._users.values(), key=lambda u: u.created_at, reverse=True)
+        return all_users[offset : offset + limit], len(all_users)
 
     async def remove(self, entity: User) -> None:
         self._users.pop(entity.id, None)
@@ -201,10 +213,25 @@ async def test_user_service_list(user_service: UserService, admin_actor: User) -
     await user_service.create(make_user_create(email="a@example.com"), acting_user=admin_actor)
     await user_service.create(make_user_create(email="b@example.com"), acting_user=admin_actor)
 
-    users = await user_service.list()
+    users, total = await user_service.list(limit=50, offset=0)
 
     assert len(users) == 2
+    assert total == 2
     assert {u.email for u in users} == {"a@example.com", "b@example.com"}
+
+
+async def test_user_service_list_pagination_smoke(
+    user_service: UserService, admin_actor: User
+) -> None:
+    for i in range(3):
+        await user_service.create(
+            make_user_create(email=f"pg{i}@example.com"), acting_user=admin_actor
+        )
+
+    page, total = await user_service.list(limit=2, offset=0)
+
+    assert len(page) == 2
+    assert total == 3
 
 
 async def test_user_service_update_role_leaves_is_active_unchanged(
