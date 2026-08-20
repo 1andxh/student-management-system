@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # Only db-test's shape is needed — pytest never touches the dev
+    # database (test_engine connects to DATABASE_URL_TEST only). Running
+    # natively here rather than through docker-compose: the containerized
+    # dev workflow (ADR 0003) exists specifically to work around this
+    # machine's WSL2 port-forwarding flakiness, which doesn't apply to
+    # GitHub's own runners.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: sms
+          POSTGRES_PASSWORD: sms
+          POSTGRES_DB: sms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sms -d sms_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      # DATABASE_URL is required by Settings but never actually connected
+      # to in CI — pointed at the same service so app startup doesn't fail
+      # validation, not because anything reads from it here.
+      DATABASE_URL: postgresql+asyncpg://sms:sms@localhost:5432/sms_test
+      DATABASE_URL_TEST: postgresql+asyncpg://sms:sms@localhost:5432/sms_test
+      # 32+ chars, not on the placeholder blocklist in core/config.py — a
+      # throwaway value scoped to this CI run only, not a real secret.
+      JWT_SECRET_KEY: ci-only-throwaway-secret-not-used-in-prod
+      # Not set here — tests/conftest.py's apply_migrations fixture sets
+      # and unsets ALEMBIC_TARGET=test itself around the one place it
+      # matters (the alembic upgrade call), matching the "single explicit
+      # switch" design (docs/adr — see alembic/env.py).
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # No separate migration step — tests/conftest.py's apply_migrations
+      # fixture (autouse, session-scoped) runs `alembic upgrade head`
+      # itself at test-session start, same as the local Docker flow.
+      - name: Run tests
+        run: uv run pytest -v
