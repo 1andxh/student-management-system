@@ -6,7 +6,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sms.domains.auth.models import User, UserRole
+from sms.domains.users.models import User, UserRole
 from sms.domains.students.models import Student
 
 
