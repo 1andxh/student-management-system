@@ -46,10 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No python-version input — that's an actions/setup-python parameter,
+      # not this action's. setup-uv only installs the uv binary; uv itself
+      # resolves the Python version from pyproject.toml's requires-python
+      # (and downloads a matching interpreter if needed) during `uv sync`.
       - name: Install uv
         uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.13"
 
       - name: Install dependencies
         run: uv sync --frozen
