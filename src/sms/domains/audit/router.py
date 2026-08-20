@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.pagination import Pagination, pagination_params
 from sms.db.session import get_db
 from sms.domains.audit.models import AuditLog
 from sms.domains.audit.repository import AuditLogRepository
@@ -23,5 +24,11 @@ def get_audit_service(session: AsyncSession = Depends(get_db)) -> AuditService:
 
 
 @router.get("", response_model=list[AuditLogRead], dependencies=[Depends(_super_admin_only)])
-async def list_audit_log(service: AuditService = Depends(get_audit_service)) -> list[AuditLog]:
-    return await service.list_all()
+async def list_audit_log(
+    response: Response,
+    pagination: Pagination = Depends(pagination_params),
+    service: AuditService = Depends(get_audit_service),
+) -> list[AuditLog]:
+    items, total = await service.list_all(limit=pagination.limit, offset=pagination.offset)
+    response.headers["X-Total-Count"] = str(total)
+    return items
