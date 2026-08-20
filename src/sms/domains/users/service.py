@@ -92,8 +92,8 @@ class UserService:
             raise UserNotFoundError()
         return user
 
-    async def list(self) -> list[User]:
-        return await self._repository.list()
+    async def list(self, *, limit: int, offset: int) -> tuple[list[User], int]:
+        return await self._repository.list(limit=limit, offset=offset)
 
     async def update(self, user_id: UUID, data: UserUpdate, acting_user: User) -> User:
         user = await self.get(user_id)
