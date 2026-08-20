@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.pagination import paginate
 from sms.core.repository import AbstractRepository
 from sms.domains.students.models import Student
 
@@ -24,9 +25,9 @@ class StudentRepository(AbstractRepository[Student]):
     async def get(self, entity_id: UUID) -> Student | None:
         return await self._session.get(Student, entity_id)
 
-    async def list(self) -> list[Student]:
-        result = await self._session.execute(select(Student))
-        return list(result.scalars().all())
+    async def list(self, *, limit: int, offset: int) -> tuple[list[Student], int]:
+        query = select(Student).order_by(Student.created_at.desc())
+        return await paginate(self._session, query, limit=limit, offset=offset)
 
     async def remove(self, entity: Student) -> None:
         await self._session.delete(entity)
@@ -40,4 +41,8 @@ class StudentRepository(AbstractRepository[Student]):
         result = await self._session.execute(
             select(Student).where(Student.student_number == student_number)
         )
+        return result.scalar_one_or_none()
+
+    async def get_by_user_id(self, user_id: UUID) -> Student | None:
+        result = await self._session.execute(select(Student).where(Student.user_id == user_id))
         return result.scalar_one_or_none()
