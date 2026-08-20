@@ -27,6 +27,8 @@ class AuditService:
         )
         return await self._repository.add(entry, commit=commit)
 
-    async def list_all(self) -> list[AuditLog]:
-        entries = await self._repository.list()
-        return sorted(entries, key=lambda entry: entry.created_at, reverse=True)
+    async def list_all(self, *, limit: int, offset: int) -> tuple[list[AuditLog], int]:
+        # No Python-side sorted() anymore — the repository orders at the
+        # DB level now, required for pagination to slice correctly. See
+        # docs/adr/0020.
+        return await self._repository.list(limit=limit, offset=offset)
