@@ -1,8 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.pagination import Pagination, pagination_params
 from sms.db.session import get_db
 from sms.domains.auth.dependencies import get_current_user, require_role
 from sms.domains.users.models import UserRole
@@ -35,8 +36,14 @@ async def create_student(
 
 
 @router.get("", response_model=list[StudentRead], dependencies=[Depends(get_current_user)])
-async def list_students(service: StudentService = Depends(get_student_service)) -> list[Student]:
-    return await service.list()
+async def list_students(
+    response: Response,
+    pagination: Pagination = Depends(pagination_params),
+    service: StudentService = Depends(get_student_service),
+) -> list[Student]:
+    items, total = await service.list(limit=pagination.limit, offset=pagination.offset)
+    response.headers["X-Total-Count"] = str(total)
+    return items
 
 
 @router.get(
