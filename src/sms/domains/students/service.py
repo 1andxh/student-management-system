@@ -17,6 +17,11 @@ class StudentService:
             raise StudentAlreadyExistsError()
         if await self._repository.get_by_student_number(data.student_number) is not None:
             raise StudentAlreadyExistsError()
+        if (
+            data.user_id is not None
+            and await self._repository.get_by_user_id(data.user_id) is not None
+        ):
+            raise StudentAlreadyExistsError()
 
         student = Student(
             student_number=data.student_number,
@@ -27,6 +32,7 @@ class StudentService:
             guardian_name=data.guardian_name,
             guardian_phone=data.guardian_phone,
             enrollment_status=EnrollmentStatus.ACTIVE,
+            user_id=data.user_id,
         )
         try:
             return await self._repository.add(student)
@@ -44,12 +50,35 @@ class StudentService:
             raise StudentNotFoundError()
         return student
 
-    async def list(self) -> list[Student]:
-        return await self._repository.list()
+    async def list(self, *, limit: int, offset: int) -> tuple[list[Student], int]:
+        return await self._repository.list(limit=limit, offset=offset)
 
     async def update(self, student_id: UUID, data: StudentUpdate) -> Student:
         student = await self.get(student_id)
         updates = data.model_dump(exclude_unset=True)
+
+        # Pre-checks for every uniqueness field, not just the one this
+        # stage is adding (user_id) — matching the fix already established
+        # for Teacher (docs/adr/0014): the DB constraint alone isn't
+        # exercised by the in-memory unit-test fake, only by a real DB.
+        new_email = updates.get("email")
+        if new_email is not None and new_email != student.email:
+            existing = await self._repository.get_by_email(new_email)
+            if existing is not None and existing.id != student_id:
+                raise StudentAlreadyExistsError()
+
+        new_number = updates.get("student_number")
+        if new_number is not None and new_number != student.student_number:
+            existing = await self._repository.get_by_student_number(new_number)
+            if existing is not None and existing.id != student_id:
+                raise StudentAlreadyExistsError()
+
+        new_user_id = updates.get("user_id")
+        if new_user_id is not None and new_user_id != student.user_id:
+            existing = await self._repository.get_by_user_id(new_user_id)
+            if existing is not None and existing.id != student_id:
+                raise StudentAlreadyExistsError()
+
         for field, value in updates.items():
             setattr(student, field, value)
         try:
