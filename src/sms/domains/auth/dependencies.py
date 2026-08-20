@@ -6,8 +6,8 @@ from sms.core.exceptions import PermissionDeniedError, UnauthorizedError
 from sms.core.security import decode_access_token
 from sms.db.session import get_db
 from sms.domains.auth.exceptions import InactiveUserError
-from sms.domains.auth.models import User, UserRole
-from sms.domains.auth.repository import UserRepository
+from sms.domains.users.models import User, UserRole
+from sms.domains.users.repository import UserRepository
 
 # auto_error=False so a missing header comes back as our own 401
 # (UnauthorizedError) instead of HTTPBearer's default 403.
@@ -36,7 +36,10 @@ async def get_current_user(
 
 def require_role(*allowed_roles: UserRole):
     async def dependency(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in allowed_roles:
+        # SUPER_ADMIN satisfies any role check, not just an explicitly
+        # listed one — a true "super" role, so adding a new admin-gated
+        # route elsewhere never requires remembering to also list it.
+        if current_user.role != UserRole.SUPER_ADMIN and current_user.role not in allowed_roles:
             raise PermissionDeniedError()
         return current_user
 
