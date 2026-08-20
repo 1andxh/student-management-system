@@ -11,7 +11,7 @@ from sms.core.config import settings
 from sms.core.rate_limit import limiter
 from sms.core.security import create_access_token, hash_password
 from sms.db.session import get_db
-from sms.domains.auth.models import User, UserRole
+from sms.domains.users.models import User, UserRole
 from sms.main import create_app
 
 
