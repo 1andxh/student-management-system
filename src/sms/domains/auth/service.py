@@ -9,12 +9,19 @@ from sms.core.security import (
     verify_password,
 )
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
-from sms.domains.auth.models import Session, User
-from sms.domains.auth.repository import SessionRepository, UserRepository
+from sms.domains.auth.models import Session
+from sms.domains.auth.repository import SessionRepository
 from sms.domains.auth.schemas import LoginRequest, TokenResponse
+from sms.domains.users.models import User
+from sms.domains.users.repository import UserRepository
 
 
 class AuthService:
+    """Self-service login/refresh/logout. Depends on the users domain's
+    model and repository (to look up who's logging in) — see docs/adr/0012
+    for why this is a one-way dependency, not a reason to fold users into
+    this domain."""
+
     def __init__(
         self, user_repository: UserRepository, session_repository: SessionRepository
     ) -> None:
