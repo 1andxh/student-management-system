@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.core.config import settings
-from sms.domains.auth.models import Session, User
+from sms.domains.auth.models import Session
+from sms.domains.users.models import User
 
 
 async def test_post_login_happy_path(
