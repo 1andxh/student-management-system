@@ -1,0 +1,21 @@
+# 0017. Enrollment
+
+## Status
+Accepted
+
+## Context
+Stage 6 of the build plan — the first operation genuinely spanning two aggregates (`Class`, `Enrollment`) in one transaction, and explicitly flagged since the original plan as the point to decide whether a Unit-of-Work wrapper earns its place, rather than deciding that in Stage 0 for a need that didn't exist yet.
+
+## Decision
+- **No Unit-of-Work wrapper.** Raised as an explicit choice, not decided silently, per the plan's own commitment to surface it here. The capacity-race guard needs one locking *read* on `Class` (no write to `Class` itself) followed by exactly one *write* (the `Enrollment` insert) — there's no second write needing atomicity with the first, unlike Stage 2d's `User`+`AuditLog` case (ADR 0011), which is what actually motivated the `commit: bool = True` / shared-commit pattern in the first place. A single new repository method (`ClassRepository.get_for_update`) plus the existing shared-`AsyncSession`-per-request convention covers this completely.
+- **`ClassRepository.get_for_update(class_id)`** does a `SELECT ... FOR UPDATE`, the same locking pattern already established by `UserRepository.count_active_super_admins()` (ADR 0011). The lock is held from that read through `EnrollmentRepository.add()`'s own commit — correct as long as nothing else commits on that session in between, which holds here since every intervening step (student-existence check, duplicate-enrollment check, active-count) is read-only.
+- **Mutations (`enroll`/`drop`) are `ADMIN`+`TEACHER`** — raised as a real fork (the plan didn't specify a tier for this stage) and confirmed before building. Enrollment is day-to-day academic record-keeping, the same tier as `Students` (which teachers already manage directly), not structural/HR data like `Classes`/`Teachers`/`Users`.
+- **`Enrollment`'s FKs (`student_id`, `class_id`) are `ON DELETE RESTRICT`**, extending the same protective reasoning from `Class`'s own FKs (ADR 0016) one level further — enrollment history is real academic-record data, an unrelated `Student`/`Class` deletion shouldn't silently erase it.
+- **Dropping is a status transition (`ACTIVE` → `DROPPED`), not a hard delete** — `PATCH /enrollments/{id}/drop`, no `DELETE` route. The model's third state, `COMPLETED`, has no endpoint to set it yet; nothing in this stage's scope calls for one (likely tied to term-end processing in a later stage), so it wasn't built preemptively.
+- **`GET /enrollments` supports `student_id`/`class_id` query-param filtering** — the first domain in this codebase to add list filtering, but explicitly called for by the plan itself ("list by student/by class"), not scope creep.
+- **The capacity-race guard is code-review-verified, not test-suite-verified** — the automated suite tests the boundary condition sequentially (enrolling up to exactly capacity, then confirming the next one is rejected), not true concurrent racing. This project's `db_session` fixture (one `SAVEPOINT`-wrapped transaction per test) doesn't meaningfully simulate two independent concurrent transactions, so a forced `asyncio.gather()`-style race test would be flaky or misleading rather than a real proof — same position `count_active_super_admins`' own lock was already in before this stage.
+
+## Consequences
+- Any future domain needing a similar "lock a row, check an aggregate invariant, then write elsewhere" shape should reach for a repository-level `get_for_update()` method first, not a Unit-of-Work abstraction — that abstraction still isn't justified anywhere in this codebase as of this stage.
+- Stage 7 (Grades) will be the second aggregate needing a cross-table numeric invariant (`score <= assessment.max_score`) — expect the same "service-level fetch-and-compare" pattern used for `TermService`'s year-range check (ADR 0015) and this stage's capacity check, not a new mechanism.
+- 283/283 tests passing (251 pre-Stage-6 + 32 new). One spurious 3-test failure surfaced mid-verification from the orchestrator's own overlapping `pytest` invocations (the same class of false failure documented in ADR 0009/0011's process notes) — diagnosed correctly as a process artifact, not a code bug, before touching anything; a single clean re-run confirmed the true result.
