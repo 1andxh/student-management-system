@@ -1,13 +1,17 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import date
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.config import settings
+from sms.db.session import get_db
 from sms.domains.teachers.models import Teacher
 from sms.domains.users.models import User, UserRole
+from sms.main import create_app
 
 
 def make_payload(**overrides: object) -> dict[str, object]:
@@ -57,6 +61,31 @@ def make_manage_headers(
         return auth_headers(user)
 
     return _make_headers
+
+
+@pytest.fixture
+async def client_with_uploads(db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Same shape as conftest.py's shared `client` fixture, but with
+    settings.upload_dir monkeypatched to a pytest tmp_path *before*
+    create_app() runs — main.py mounts StaticFiles(directory=
+    settings.upload_dir) at app-creation time, so the patch has to land
+    before that call, not just before the request. Mirrors
+    tests/domains/students/integration/test_router.py's fixture of the
+    same name."""
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+
+    app = create_app()
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+    app.dependency_overrides.clear()
 
 
 async def test_post_teachers_happy_path(
@@ -264,3 +293,76 @@ async def test_delete_teacher_as_teacher_role_returns_403(
     response = await client.delete(f"/teachers/{teacher.id}", headers=headers)
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# POST /teachers/{teacher_id}/profile-picture
+# ---------------------------------------------------------------------------
+
+
+async def test_post_teacher_profile_picture_happy_path(
+    client_with_uploads: AsyncClient,
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    teacher = await make_teacher(email="pfp1@example.com")
+    headers = await make_manage_headers(email="admin-pfp1@example.com")
+
+    response = await client_with_uploads.post(
+        f"/teachers/{teacher.id}/profile-picture",
+        files={"file": ("photo.jpg", b"\xff\xd8\xfffake-jpeg-body", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile_picture_path"] == f"teachers/{teacher.id}.jpg"
+
+
+async def test_post_teacher_profile_picture_wrong_content_type_returns_415(
+    client_with_uploads: AsyncClient,
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    teacher = await make_teacher(email="pfp2@example.com")
+    headers = await make_manage_headers(email="admin-pfp2@example.com")
+
+    response = await client_with_uploads.post(
+        f"/teachers/{teacher.id}/profile-picture",
+        files={"file": ("doc.pdf", b"not an image", "application/pdf")},
+        headers=headers,
+    )
+
+    assert response.status_code == 415
+
+
+async def test_post_teacher_profile_picture_as_teacher_role_returns_403(
+    client_with_uploads: AsyncClient,
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    teacher = await make_teacher(email="pfp3@example.com")
+    headers = await make_manage_headers(role=UserRole.TEACHER, email="teacher-pfp3@example.com")
+
+    response = await client_with_uploads.post(
+        f"/teachers/{teacher.id}/profile-picture",
+        files={"file": ("photo.jpg", b"\xff\xd8\xfffake-jpeg-body", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+
+
+async def test_post_teacher_profile_picture_missing_teacher_returns_404(
+    client_with_uploads: AsyncClient,
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    headers = await make_manage_headers(email="admin-pfp4@example.com")
+
+    response = await client_with_uploads.post(
+        f"/teachers/{uuid4()}/profile-picture",
+        files={"file": ("photo.jpg", b"\xff\xd8\xfffake-jpeg-body", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 404
