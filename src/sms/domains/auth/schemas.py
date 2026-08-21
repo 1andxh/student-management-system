@@ -6,6 +6,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PinLoginRequest(BaseModel):
+    student_number: str
+    pin: str
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str

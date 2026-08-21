@@ -5,8 +5,15 @@ from sms.core.rate_limit import limiter
 from sms.db.session import get_db
 from sms.domains.auth.dependencies import get_current_user
 from sms.domains.auth.repository import SessionRepository
-from sms.domains.auth.schemas import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
+from sms.domains.auth.schemas import (
+    LoginRequest,
+    LogoutRequest,
+    PinLoginRequest,
+    RefreshRequest,
+    TokenResponse,
+)
 from sms.domains.auth.service import AuthService
+from sms.domains.students.repository import StudentRepository
 from sms.domains.users.models import User
 from sms.domains.users.repository import UserRepository
 from sms.domains.users.schemas import UserRead
@@ -15,7 +22,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def get_auth_service(session: AsyncSession = Depends(get_db)) -> AuthService:
-    return AuthService(UserRepository(session), SessionRepository(session))
+    return AuthService(UserRepository(session), SessionRepository(session), StudentRepository(session))
 
 
 def _client_metadata(request: Request) -> tuple[str | None, str | None]:
@@ -31,6 +38,15 @@ async def login(
 ) -> TokenResponse:
     user_agent, ip_address = _client_metadata(request)
     return await service.login(data, user_agent=user_agent, ip_address=ip_address)
+
+
+@router.post("/login-pin", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def login_pin(
+    request: Request, data: PinLoginRequest, service: AuthService = Depends(get_auth_service)
+) -> TokenResponse:
+    user_agent, ip_address = _client_metadata(request)
+    return await service.login_with_pin(data, user_agent=user_agent, ip_address=ip_address)
 
 
 @router.post("/refresh", response_model=TokenResponse)

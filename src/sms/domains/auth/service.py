@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from sms.core.config import settings
 from sms.core.security import (
@@ -11,8 +12,9 @@ from sms.core.security import (
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
 from sms.domains.auth.models import Session
 from sms.domains.auth.repository import SessionRepository
-from sms.domains.auth.schemas import LoginRequest, TokenResponse
-from sms.domains.users.models import User
+from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenResponse
+from sms.domains.students.repository import StudentRepository
+from sms.domains.users.models import User, UserRole
 from sms.domains.users.repository import UserRepository
 
 
@@ -20,13 +22,20 @@ class AuthService:
     """Self-service login/refresh/logout. Depends on the users domain's
     model and repository (to look up who's logging in) — see docs/adr/0012
     for why this is a one-way dependency, not a reason to fold users into
-    this domain."""
+    this domain. Also depends on students (for the PIN login path) — a
+    second one-way fan-in dependency, same non-circular shape as every
+    other cross-domain dependency in this codebase (students doesn't
+    depend back on auth for its own core logic)."""
 
     def __init__(
-        self, user_repository: UserRepository, session_repository: SessionRepository
+        self,
+        user_repository: UserRepository,
+        session_repository: SessionRepository,
+        student_repository: StudentRepository,
     ) -> None:
         self._users = user_repository
         self._sessions = session_repository
+        self._students = student_repository
 
     async def login(
         self,
@@ -44,6 +53,51 @@ class AuthService:
         password_ok = verify_password(data.password, hashed_password)
 
         if user is None or not password_ok or not user.is_active:
+            raise InvalidCredentialsError()
+
+        access_token = create_access_token(user.id)
+        refresh_token = await self._issue_session(user, user_agent, ip_address)
+        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+    async def login_with_pin(
+        self,
+        data: PinLoginRequest,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+    ) -> TokenResponse:
+        student = await self._students.get_by_student_number(data.student_number)
+
+        # Always look up a user, on every branch — a random nonexistent id
+        # when there's no real linked user — so this performs the same
+        # number of DB round-trips regardless of whether student_number or
+        # the link exists. A conditional second query here would be a
+        # timing side-channel letting an attacker distinguish "no such
+        # student_number" from "student_number exists" before ever
+        # touching the PIN, undermining the oracle defense below the same
+        # way a distinguishing error message would.
+        lookup_user_id = (
+            student.user_id if (student is not None and student.user_id is not None) else uuid4()
+        )
+        user = await self._users.get(lookup_user_id)
+
+        # Same oracle-defense shape as login(): always verify against
+        # *some* hash regardless of whether the student/pin/link exists,
+        # and raise the identical error for every failure branch — no
+        # student, no pin set, no linked user, wrong pin, inactive
+        # account. See docs/adr/0008.
+        hashed_pin = (
+            student.pin_hash if (student is not None and student.pin_hash) else DUMMY_PASSWORD_HASH
+        )
+        pin_ok = verify_password(data.pin, hashed_pin)
+
+        if (
+            student is None
+            or student.pin_hash is None
+            or user is None
+            or user.role != UserRole.STUDENT
+            or not pin_ok
+            or not user.is_active
+        ):
             raise InvalidCredentialsError()
 
         access_token = create_access_token(user.id)

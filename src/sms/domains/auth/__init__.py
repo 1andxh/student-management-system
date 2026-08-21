@@ -1,7 +1,8 @@
 """Auth domain — sessions, login/refresh/logout, RBAC dependencies. Owns no
 account data itself: it depends on sms.domains.users for the User model and
-repository (see docs/adr/0012). Every other domain depends on this one for
-authentication/authorization (see docs/adr/0006)."""
+repository (see docs/adr/0012), and on sms.domains.students for the PIN
+login path. Every other domain depends on this one for authentication/
+authorization (see docs/adr/0006)."""
 
 from sms.domains.auth.dependencies import get_current_user, require_role
 from sms.domains.auth.exceptions import (
@@ -11,7 +12,13 @@ from sms.domains.auth.exceptions import (
 )
 from sms.domains.auth.models import Session
 from sms.domains.auth.repository import SessionRepository
-from sms.domains.auth.schemas import LoginRequest, LogoutRequest, RefreshRequest, TokenResponse
+from sms.domains.auth.schemas import (
+    LoginRequest,
+    LogoutRequest,
+    PinLoginRequest,
+    RefreshRequest,
+    TokenResponse,
+)
 from sms.domains.auth.service import AuthService
 
 __all__ = [
@@ -24,6 +31,7 @@ __all__ = [
     "SessionRepository",
     "LoginRequest",
     "LogoutRequest",
+    "PinLoginRequest",
     "RefreshRequest",
     "TokenResponse",
     "AuthService",
