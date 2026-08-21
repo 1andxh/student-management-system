@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import UUID
 
+from fastapi import UploadFile
 from sqlalchemy.exc import IntegrityError
 
+from sms.core import file_storage
+from sms.core.config import settings
 from sms.domains.teachers.exceptions import (
     ChangeRequestNotPendingError,
     PendingChangeRequestExistsError,
@@ -77,7 +81,17 @@ class TeacherService:
 
     async def delete(self, teacher_id: UUID) -> None:
         teacher = await self.get(teacher_id)
+        if teacher.profile_picture_path is not None:
+            Path(settings.upload_dir, teacher.profile_picture_path).unlink(missing_ok=True)
         await self._repository.remove(teacher)
+
+    async def upload_profile_picture(self, teacher_id: UUID, file: UploadFile) -> Teacher:
+        teacher = await self.get(teacher_id)
+        path = await file_storage.save_profile_picture(
+            file, subdir="teachers", entity_id=teacher.id
+        )
+        teacher.profile_picture_path = path
+        return await self._repository.add(teacher)
 
 
 class TeacherChangeRequestService:

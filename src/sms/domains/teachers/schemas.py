@@ -30,6 +30,7 @@ class TeacherRead(TeacherBase):
 
     id: UUID
     user_id: UUID | None
+    profile_picture_path: str | None
     created_at: datetime
     updated_at: datetime
 

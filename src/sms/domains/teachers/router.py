@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.core.pagination import Pagination, pagination_params
@@ -157,3 +157,16 @@ async def delete_teacher(
     teacher_id: UUID, service: TeacherService = Depends(get_teacher_service)
 ) -> None:
     await service.delete(teacher_id)
+
+
+@router.post(
+    "/{teacher_id}/profile-picture",
+    response_model=TeacherRead,
+    dependencies=[Depends(_admin_only)],
+)
+async def upload_teacher_profile_picture(
+    teacher_id: UUID,
+    file: UploadFile = File(...),
+    service: TeacherService = Depends(get_teacher_service),
+) -> Teacher:
+    return await service.upload_profile_picture(teacher_id, file)
