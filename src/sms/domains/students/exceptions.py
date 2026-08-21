@@ -7,3 +7,7 @@ class StudentNotFoundError(NotFoundError):
 
 class StudentAlreadyExistsError(ConflictError):
     message = "A student with this email or student number already exists."
+
+
+class StudentHasNoLinkedRecordError(NotFoundError):
+    message = "No student record is linked to your account."

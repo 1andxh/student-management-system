@@ -17,6 +17,10 @@ class StudentBase(BaseModel):
 
 
 class StudentCreate(StudentBase):
+    # Overrides StudentBase's required student_number — omit it to have
+    # StudentService.create() generate one (STU-0001, ...) via a DB
+    # sequence; supply it to keep the existing manual-override behavior.
+    student_number: str | None = None
     user_id: UUID | None = None
 
 
@@ -38,5 +42,14 @@ class StudentRead(StudentBase):
     id: UUID
     user_id: UUID | None
     enrollment_status: EnrollmentStatus
+    profile_picture_path: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class StudentCredentialsRead(BaseModel):
+    """The raw PIN appears here once, on generation/reset, and nowhere
+    else — never persisted, never logged, not part of StudentRead."""
+
+    student_number: str
+    pin: str

@@ -59,6 +59,13 @@ class Student(Base):
     )
     guardian_name: Mapped[str] = mapped_column(String, nullable=False)
     guardian_phone: Mapped[str] = mapped_column(String, nullable=False)
+    # Hashed via the same core.security.hash_password used for User
+    # passwords (a generic string hasher despite the name) — never the
+    # plaintext PIN, which exists only in the one-time StudentCredentialsRead
+    # response. Lives here, not on User, since it's a student_number-scoped
+    # credential — the lookup-then-verify pair belongs on the same row.
+    pin_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    profile_picture_path: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
