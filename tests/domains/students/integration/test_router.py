@@ -1,13 +1,18 @@
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sms.core.config import settings
+from sms.db.session import get_db
 from sms.domains.users.models import User, UserRole
 from sms.domains.students.models import Student
+from sms.main import create_app
 
 
 def make_payload(**overrides: object) -> dict[str, object]:
@@ -63,6 +68,32 @@ def make_manage_headers(
         return auth_headers(user)
 
     return _make_headers
+
+
+@pytest.fixture
+async def client_with_uploads(db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Same shape as conftest.py's shared `client` fixture, but with
+    settings.upload_dir monkeypatched to a pytest tmp_path *before*
+    create_app() runs — main.py mounts StaticFiles(directory=
+    settings.upload_dir) at app-creation time, so the patch has to land
+    before that call, not just before the request. Sibling function-scoped
+    fixtures aren't guaranteed to initialize in argument-list order, so
+    rather than lean on that, profile-picture tests build their own app
+    instance here instead of depending on the shared `client` fixture."""
+    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
+
+    app = create_app()
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+    app.dependency_overrides.clear()
 
 
 async def test_post_students_happy_path(
@@ -356,3 +387,235 @@ async def test_post_students_missing_required_field_returns_422(
     body = response.json()
     assert body["detail"] == "Validation failed."
     assert "errors" in body
+
+
+# ---------------------------------------------------------------------------
+# Auto-generated student_number
+# ---------------------------------------------------------------------------
+
+
+async def test_post_students_without_student_number_auto_generates_one(
+    client: AsyncClient, make_manage_headers: Callable[..., Awaitable[dict[str, str]]]
+) -> None:
+    headers = await make_manage_headers(email="admin-autogen1@example.com")
+    payload = make_payload(email="autogen1@example.com")
+    del payload["student_number"]
+
+    response = await client.post("/students", json=payload, headers=headers)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert re.fullmatch(r"STU-\d{4}", body["student_number"])
+
+
+# ---------------------------------------------------------------------------
+# POST /students/{student_id}/credentials
+# ---------------------------------------------------------------------------
+
+
+async def test_post_credentials_happy_path(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    student = await make_student(student_number="S-CRED-1", email="cred1@example.com")
+    headers = await make_manage_headers(email="admin-cred1@example.com")
+
+    response = await client.post(f"/students/{student.id}/credentials", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["student_number"] == "S-CRED-1"
+    assert re.fullmatch(r"\d{6}", body["pin"])
+
+    # The issued PIN must actually work against /auth/login-pin.
+    login_response = await client.post(
+        "/auth/login-pin", json={"student_number": "S-CRED-1", "pin": body["pin"]}
+    )
+    assert login_response.status_code == 200
+    assert login_response.json()["access_token"]
+
+
+async def test_post_credentials_as_non_admin_returns_403(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    student = await make_student(student_number="S-CRED-2", email="cred2@example.com")
+    headers = await make_manage_headers(role=UserRole.TEACHER, email="teacher-cred2@example.com")
+
+    response = await client.post(f"/students/{student.id}/credentials", headers=headers)
+
+    assert response.status_code == 403
+
+
+async def test_post_credentials_missing_student_returns_404(
+    client: AsyncClient, make_manage_headers: Callable[..., Awaitable[dict[str, str]]]
+) -> None:
+    headers = await make_manage_headers(email="admin-cred3@example.com")
+
+    response = await client.post(f"/students/{uuid4()}/credentials", headers=headers)
+
+    assert response.status_code == 404
+
+
+async def test_post_credentials_without_token_returns_401(
+    client: AsyncClient, make_student: Callable[..., Awaitable[Student]]
+) -> None:
+    student = await make_student(student_number="S-CRED-4", email="cred4@example.com")
+
+    response = await client.post(f"/students/{student.id}/credentials")
+
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /students/me
+# ---------------------------------------------------------------------------
+
+
+async def test_get_students_me_happy_path_with_email_login_token(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+) -> None:
+    user = await make_user(role=UserRole.STUDENT, email="me-student1@example.com")
+    student = await make_student(
+        student_number="S-ME-1", email="me-linked1@example.com", user_id=user.id
+    )
+    headers = auth_headers(user)
+
+    response = await client.get("/students/me", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == str(student.id)
+    assert body["email"] == student.email
+
+
+async def test_get_students_me_happy_path_with_pin_login_token(
+    client: AsyncClient,
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    headers = await make_manage_headers(email="admin-me-pin@example.com")
+    payload = make_payload(student_number="S-ME-2", email="me-pin@example.com")
+
+    create_response = await client.post("/students", json=payload, headers=headers)
+    assert create_response.status_code == 201
+    student_id = create_response.json()["id"]
+
+    creds_response = await client.post(f"/students/{student_id}/credentials", headers=headers)
+    assert creds_response.status_code == 200
+    pin = creds_response.json()["pin"]
+
+    login_response = await client.post(
+        "/auth/login-pin", json={"student_number": "S-ME-2", "pin": pin}
+    )
+    assert login_response.status_code == 200
+    pin_token = login_response.json()["access_token"]
+
+    response = await client.get(
+        "/students/me", headers={"Authorization": f"Bearer {pin_token}"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == student_id
+
+
+async def test_get_students_me_no_linked_record_returns_404(
+    client: AsyncClient,
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+) -> None:
+    user = await make_user(role=UserRole.STUDENT, email="me-nolink@example.com")
+    headers = auth_headers(user)
+
+    response = await client.get("/students/me", headers=headers)
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+async def test_get_students_me_without_token_returns_401(client: AsyncClient) -> None:
+    response = await client.get("/students/me")
+
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# POST /students/{student_id}/profile-picture
+# ---------------------------------------------------------------------------
+
+
+async def test_post_profile_picture_happy_path(
+    client_with_uploads: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    student = await make_student(student_number="S-PFP-1", email="pfp1@example.com")
+    headers = await make_manage_headers(email="admin-pfp1@example.com")
+
+    response = await client_with_uploads.post(
+        f"/students/{student.id}/profile-picture",
+        files={"file": ("photo.jpg", b"\xff\xd8\xfffake-jpeg-body", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    expected_path = f"students/{student.id}.jpg"
+    assert body["profile_picture_path"] == expected_path
+
+    static_response = await client_with_uploads.get(f"/uploads/{expected_path}")
+    assert static_response.status_code == 200
+    assert static_response.content == b"\xff\xd8\xfffake-jpeg-body"
+
+
+async def test_post_profile_picture_wrong_content_type_returns_415(
+    client_with_uploads: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    student = await make_student(student_number="S-PFP-2", email="pfp2@example.com")
+    headers = await make_manage_headers(email="admin-pfp2@example.com")
+
+    response = await client_with_uploads.post(
+        f"/students/{student.id}/profile-picture",
+        files={"file": ("doc.pdf", b"not an image", "application/pdf")},
+        headers=headers,
+    )
+
+    assert response.status_code == 415
+
+
+async def test_post_profile_picture_as_non_admin_returns_403(
+    client_with_uploads: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    student = await make_student(student_number="S-PFP-3", email="pfp3@example.com")
+    headers = await make_manage_headers(role=UserRole.TEACHER, email="teacher-pfp3@example.com")
+
+    response = await client_with_uploads.post(
+        f"/students/{student.id}/profile-picture",
+        files={"file": ("photo.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+
+
+async def test_post_profile_picture_missing_student_returns_404(
+    client_with_uploads: AsyncClient,
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    headers = await make_manage_headers(email="admin-pfp4@example.com")
+
+    response = await client_with_uploads.post(
+        f"/students/{uuid4()}/profile-picture",
+        files={"file": ("photo.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=headers,
+    )
+
+    assert response.status_code == 404
