@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -7,9 +7,40 @@ from sms.core.repository import AbstractRepository
 from sms.core.security import hash_password, hash_token
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
 from sms.domains.auth.models import Session
-from sms.domains.auth.schemas import LoginRequest, TokenResponse
+from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenResponse
 from sms.domains.auth.service import AuthService
+from sms.domains.students.models import EnrollmentStatus, Student
 from sms.domains.users.models import User, UserRole
+
+# One-directional import (not the reverse) to avoid a circular import between
+# this module and tests/domains/students/unit/test_service.py — see that
+# file's comment for why it defines its own local FakeUserRepository instead
+# of importing this module's. FakeStudentRepository already implements
+# everything AuthService.login_with_pin needs (get_by_student_number), so
+# there's no reason to duplicate that fake here.
+from tests.domains.students.unit.test_service import FakeStudentRepository
+
+
+def _make_student(**overrides: object) -> Student:
+    """Builds a Student directly (not via StudentCreate/StudentService),
+    since login_with_pin's test scenarios need control over pin_hash and
+    user_id — fields StudentCreate doesn't carry (pin_hash is only ever set
+    via StudentService.generate_pin in real usage)."""
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "student_number": "STU-0001",
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "date_of_birth": date(2010, 1, 1),
+        "email": "pin-student@example.com",
+        "guardian_name": "Byron Lovelace",
+        "guardian_phone": "+1-555-0100",
+        "enrollment_status": EnrollmentStatus.ACTIVE,
+        "user_id": None,
+        "pin_hash": None,
+    }
+    defaults.update(overrides)
+    return Student(**defaults)
 
 
 class FakeUserRepository(AbstractRepository[User]):
@@ -136,10 +167,17 @@ def session_repository() -> FakeSessionRepository:
 
 
 @pytest.fixture
+def student_repository() -> FakeStudentRepository:
+    return FakeStudentRepository()
+
+
+@pytest.fixture
 def service(
-    repository: FakeUserRepository, session_repository: FakeSessionRepository
+    repository: FakeUserRepository,
+    session_repository: FakeSessionRepository,
+    student_repository: FakeStudentRepository,
 ) -> AuthService:
-    return AuthService(repository, session_repository)
+    return AuthService(repository, session_repository, student_repository)
 
 
 async def test_login_success(service: AuthService, repository: FakeUserRepository) -> None:
@@ -277,3 +315,115 @@ async def test_logout_revokes_session(
 
 async def test_logout_with_unknown_token_does_not_raise(service: AuthService) -> None:
     await service.logout("this-token-was-never-issued")
+
+
+# ---------------------------------------------------------------------------
+# login_with_pin
+# ---------------------------------------------------------------------------
+
+
+async def test_login_with_pin_success(
+    service: AuthService,
+    repository: FakeUserRepository,
+    student_repository: FakeStudentRepository,
+) -> None:
+    user = await repository.add(make_user(email="pin-student@example.com", role=UserRole.STUDENT))
+    await student_repository.add(
+        _make_student(
+            student_number="STU-PIN-1",
+            email="pin-student@example.com",
+            user_id=user.id,
+            pin_hash=hash_password("123456"),
+        )
+    )
+
+    result = await service.login_with_pin(
+        PinLoginRequest(student_number="STU-PIN-1", pin="123456")
+    )
+
+    assert isinstance(result, TokenResponse)
+    assert result.token_type == "bearer"
+    assert result.access_token
+    assert result.refresh_token
+
+
+async def test_login_with_pin_wrong_pin_raises(
+    service: AuthService,
+    repository: FakeUserRepository,
+    student_repository: FakeStudentRepository,
+) -> None:
+    user = await repository.add(make_user(email="pin-student2@example.com", role=UserRole.STUDENT))
+    await student_repository.add(
+        _make_student(
+            student_number="STU-PIN-2",
+            email="pin-student2@example.com",
+            user_id=user.id,
+            pin_hash=hash_password("123456"),
+        )
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.login_with_pin(
+            PinLoginRequest(student_number="STU-PIN-2", pin="000000")
+        )
+
+
+async def test_login_with_pin_unknown_student_number_raises(service: AuthService) -> None:
+    with pytest.raises(InvalidCredentialsError):
+        await service.login_with_pin(
+            PinLoginRequest(student_number="NO-SUCH-STUDENT", pin="123456")
+        )
+
+
+async def test_login_with_pin_no_pin_hash_set_raises(
+    service: AuthService, student_repository: FakeStudentRepository
+) -> None:
+    await student_repository.add(
+        _make_student(student_number="STU-PIN-3", email="pin-student3@example.com", pin_hash=None)
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.login_with_pin(
+            PinLoginRequest(student_number="STU-PIN-3", pin="123456")
+        )
+
+
+async def test_login_with_pin_no_linked_user_raises(
+    service: AuthService, student_repository: FakeStudentRepository
+) -> None:
+    await student_repository.add(
+        _make_student(
+            student_number="STU-PIN-4",
+            email="pin-student4@example.com",
+            user_id=None,
+            pin_hash=hash_password("123456"),
+        )
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.login_with_pin(
+            PinLoginRequest(student_number="STU-PIN-4", pin="123456")
+        )
+
+
+async def test_login_with_pin_inactive_linked_user_raises(
+    service: AuthService,
+    repository: FakeUserRepository,
+    student_repository: FakeStudentRepository,
+) -> None:
+    user = await repository.add(
+        make_user(email="pin-student5@example.com", role=UserRole.STUDENT, is_active=False)
+    )
+    await student_repository.add(
+        _make_student(
+            student_number="STU-PIN-5",
+            email="pin-student5@example.com",
+            user_id=user.id,
+            pin_hash=hash_password("123456"),
+        )
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await service.login_with_pin(
+            PinLoginRequest(student_number="STU-PIN-5", pin="123456")
+        )

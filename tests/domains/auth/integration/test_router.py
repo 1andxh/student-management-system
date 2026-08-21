@@ -3,13 +3,116 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import jwt
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.core.config import settings
 from sms.domains.auth.models import Session
-from sms.domains.users.models import User
+from sms.domains.users.models import User, UserRole
+
+
+@pytest.fixture
+def issue_student_credentials(
+    client: AsyncClient,
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+):
+    """Creates a Student over HTTP (POST /students, auto-generated
+    student_number) and issues it login credentials (POST
+    /students/{id}/credentials), returning (student_number, pin) — the pair
+    /auth/login-pin tests need. Goes through the real admin-only endpoints
+    rather than inserting directly via db_session, since the point of these
+    tests is proving the PIN issued by that endpoint actually works against
+    login-pin end to end."""
+
+    async def _issue(email: str = "pin-e2e@example.com") -> tuple[str, str]:
+        admin = await make_user(role=UserRole.ADMIN, email=f"admin-{email}")
+        admin_headers = auth_headers(admin)
+
+        create_response = await client.post(
+            "/students",
+            json={
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "date_of_birth": "2010-01-01",
+                "email": email,
+                "guardian_name": "Byron Lovelace",
+                "guardian_phone": "+1-555-0100",
+            },
+            headers=admin_headers,
+        )
+        assert create_response.status_code == 201, create_response.text
+        student_id = create_response.json()["id"]
+        student_number = create_response.json()["student_number"]
+
+        creds_response = await client.post(
+            f"/students/{student_id}/credentials", headers=admin_headers
+        )
+        assert creds_response.status_code == 200, creds_response.text
+        pin = creds_response.json()["pin"]
+
+        return student_number, pin
+
+    return _issue
+
+
+async def test_post_login_pin_happy_path(
+    client: AsyncClient,
+    issue_student_credentials: Callable[..., Awaitable[tuple[str, str]]],
+) -> None:
+    student_number, pin = await issue_student_credentials("pin-happy@example.com")
+
+    response = await client.post(
+        "/auth/login-pin", json={"student_number": student_number, "pin": pin}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["access_token"]
+    assert body["token_type"] == "bearer"
+    assert body["refresh_token"]
+    assert body["refresh_token"] != body["access_token"]
+
+
+async def test_post_login_pin_wrong_pin_returns_401(
+    client: AsyncClient,
+    issue_student_credentials: Callable[..., Awaitable[tuple[str, str]]],
+) -> None:
+    student_number, _pin = await issue_student_credentials("pin-wrong@example.com")
+
+    response = await client.post(
+        "/auth/login-pin", json={"student_number": student_number, "pin": "000000"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_post_login_pin_unknown_student_number_returns_401(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/auth/login-pin", json={"student_number": "NO-SUCH-STUDENT", "pin": "123456"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_post_login_pin_rate_limited_after_five_attempts(
+    client: AsyncClient,
+    issue_student_credentials: Callable[..., Awaitable[tuple[str, str]]],
+) -> None:
+    student_number, _pin = await issue_student_credentials("pin-ratelimit@example.com")
+    payload = {"student_number": student_number, "pin": "000000"}
+
+    for _ in range(5):
+        response = await client.post("/auth/login-pin", json=payload)
+        assert response.status_code == 401
+
+    sixth = await client.post("/auth/login-pin", json=payload)
+
+    assert sixth.status_code == 429
 
 
 async def test_post_login_happy_path(
