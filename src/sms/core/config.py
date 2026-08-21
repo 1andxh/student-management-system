@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
 
+    upload_dir: str = "uploads"
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _reject_weak_jwt_secret(cls, value: str) -> str:

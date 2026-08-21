@@ -19,6 +19,9 @@ services:
       # bind-mounting the whole source tree — this project rebuilds on code
       # change (docker compose up --build), not hot-reload.
       - ./alembic/versions:/app/alembic/versions
+      # Named volume, not a bind mount — persistent runtime data (uploaded
+      # profile pictures), same shape as sms_db_data below, not source.
+      - sms_uploads_data:/app/uploads
     depends_on:
       db:
         condition: service_healthy
@@ -63,3 +66,4 @@ services:
 
 volumes:
   sms_db_data:
+  sms_uploads_data:

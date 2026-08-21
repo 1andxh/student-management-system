@@ -1,8 +1,12 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from slowapi.middleware import SlowAPIMiddleware
 
 from sms.api.router import api_router
+from sms.core.config import settings
 from sms.core.exception_handlers import register_exception_handlers
 from sms.core.logging import configure_logging
 from sms.core.middleware import RequestLoggingMiddleware
@@ -37,6 +41,12 @@ def create_app() -> FastAPI:
         expose_headers=["X-Total-Count"],
     )
     app.include_router(api_router)
+
+    # StaticFiles raises at construction if the directory doesn't exist —
+    # ensure it does before mounting, not just at upload time (the app
+    # must boot cleanly even before a single file has ever been uploaded).
+    Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
 
     return app
 
