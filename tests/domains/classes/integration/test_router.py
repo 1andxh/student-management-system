@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -7,7 +8,10 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.domains.academic_years.models import AcademicYear, Term
+from sms.domains.assessments.models import Assessment, AssessmentType, Grade
 from sms.domains.classes.models import Class, Subject
+from sms.domains.enrollments.models import Enrollment, EnrollmentStatus
+from sms.domains.students.models import Student
 from sms.domains.teachers.models import Teacher
 from sms.domains.users.models import User, UserRole
 
@@ -156,6 +160,162 @@ def make_manage_headers(
         return auth_headers(user)
 
     return _make_headers
+
+
+# ---------------------------------------------------------------------------
+# Local factory fixtures for the /classes/{class_id}/gradebook tests below —
+# Student/Enrollment/Assessment/Grade all belong to other domains, so these
+# are direct-DB local duplicates (not imports), same convention as
+# tests/domains/enrollments/integration/test_router.py's Subject/Term/
+# Teacher/Class fixtures.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def make_student(db_session: AsyncSession):
+    async def _make_student(**overrides: object) -> Student:
+        unique = uuid4().hex[:8]
+        defaults: dict[str, object] = {
+            "student_number": f"S-{unique}",
+            "first_name": "Grace",
+            "last_name": "Hopper",
+            "date_of_birth": date(1906, 12, 9),
+            "email": f"{unique}@example.com",
+            "guardian_name": "Walter Hopper",
+            "guardian_phone": "+1-555-0200",
+        }
+        defaults.update(overrides)
+        student = Student(**defaults)
+        db_session.add(student)
+        await db_session.commit()
+        await db_session.refresh(student)
+        return student
+
+    return _make_student
+
+
+@pytest.fixture
+def make_enrollment(db_session: AsyncSession):
+    async def _make_enrollment(
+        student_id: object, class_id: object, **overrides: object
+    ) -> Enrollment:
+        defaults: dict[str, object] = {
+            "student_id": student_id,
+            "class_id": class_id,
+            "status": EnrollmentStatus.ACTIVE,
+        }
+        defaults.update(overrides)
+        enrollment = Enrollment(**defaults)
+        db_session.add(enrollment)
+        await db_session.commit()
+        await db_session.refresh(enrollment)
+        return enrollment
+
+    return _make_enrollment
+
+
+@pytest.fixture
+def make_assessment(db_session: AsyncSession):
+    async def _make_assessment(class_id: object, **overrides: object) -> Assessment:
+        defaults: dict[str, object] = {
+            "class_id": class_id,
+            "name": "Midterm Exam",
+            "type": AssessmentType.EXAM,
+            "max_score": Decimal("100.00"),
+            "date": date(2024, 10, 15),
+        }
+        defaults.update(overrides)
+        assessment = Assessment(**defaults)
+        db_session.add(assessment)
+        await db_session.commit()
+        await db_session.refresh(assessment)
+        return assessment
+
+    return _make_assessment
+
+
+@pytest.fixture
+def make_grade(db_session: AsyncSession):
+    async def _make_grade(assessment_id: object, student_id: object, **overrides: object) -> Grade:
+        defaults: dict[str, object] = {
+            "assessment_id": assessment_id,
+            "student_id": student_id,
+            "score": Decimal("85.00"),
+        }
+        defaults.update(overrides)
+        grade = Grade(**defaults)
+        db_session.add(grade)
+        await db_session.commit()
+        await db_session.refresh(grade)
+        return grade
+
+    return _make_grade
+
+
+@pytest.fixture
+def make_class_for_teacher(
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_class: Callable[..., Awaitable[Class]],
+):
+    """Like make_class, but only needs a teacher_id (builds its own
+    Subject/Term) — used for the TEACHER class-ownership scoping tests.
+    Mirrors tests/domains/assessments/integration/test_router.py's fixture
+    of the same name."""
+
+    async def _make(teacher_id: object, **overrides: object) -> Class:
+        subject = await make_subject()
+        term = await make_term()
+        return await make_class(subject.id, term.id, teacher_id, **overrides)
+
+    return _make
+
+
+@pytest.fixture
+def make_teacher_with_headers(
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+):
+    """Creates a User (role=TEACHER) AND a Teacher record linked to that same
+    user via user_id — needed for the gradebook's TEACHER class-ownership
+    scoping tests, since GradeService resolves "my own teacher record" via
+    TeacherRepository.get_by_user_id(current_user.id). Mirrors
+    tests/domains/assessments/integration/test_router.py's fixture of the
+    same name."""
+
+    async def _make(**overrides: object) -> tuple[Teacher, dict[str, str]]:
+        unique = uuid4().hex[:8]
+        user_overrides: dict[str, object] = {"email": f"teacheruser{unique}@example.com"}
+        user_overrides.update(overrides)
+        user = await make_user(role=UserRole.TEACHER, **user_overrides)
+        teacher = await make_teacher(user_id=user.id, email=f"teacherrec{unique}@example.com")
+        return teacher, auth_headers(user)
+
+    return _make
+
+
+@pytest.fixture
+def make_student_with_headers(
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+    make_student: Callable[..., Awaitable[Student]],
+):
+    """Creates a User (role=STUDENT) AND a Student record linked to that
+    same user via user_id — needed for the "STUDENT gets 403 even for their
+    own enrolled class" gradebook test. Mirrors
+    tests/domains/assessments/integration/test_router.py's fixture of the
+    same name."""
+
+    async def _make(**overrides: object) -> tuple[Student, dict[str, str]]:
+        unique = uuid4().hex[:8]
+        user_overrides: dict[str, object] = {"email": f"student{unique}@example.com"}
+        user_overrides.update(overrides)
+        user = await make_user(role=UserRole.STUDENT, **user_overrides)
+        student = await make_student(user_id=user.id)
+        return student, auth_headers(user)
+
+    return _make
 
 
 # ---------------------------------------------------------------------------
@@ -737,3 +897,193 @@ async def test_delete_class_missing_returns_404(
 
     assert response.status_code == 404
     assert "detail" in response.json()
+
+
+# ---------------------------------------------------------------------------
+# GET /classes/{class_id}/gradebook
+# ---------------------------------------------------------------------------
+
+
+async def test_get_gradebook_assembles_correct_columns_rows_and_scores(
+    client: AsyncClient,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollment: Callable[..., Awaitable[Enrollment]],
+    make_assessment: Callable[..., Awaitable[Assessment]],
+    make_grade: Callable[..., Awaitable[Grade]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, teacher.id)
+    # Dates deliberately out of insertion order — columns must come back
+    # sorted by date ascending, not creation order.
+    quiz = await make_assessment(
+        klass.id, name="Quiz 1", date=date(2024, 9, 5), max_score=Decimal("20.00")
+    )
+    exam = await make_assessment(
+        klass.id, name="Midterm", date=date(2024, 10, 15), max_score=Decimal("100.00")
+    )
+    # Last names deliberately out of insertion order — rows must come back
+    # sorted by (last_name, first_name), not creation order.
+    student_zephyr = await make_student(first_name="Amy", last_name="Zephyr")
+    student_adams = await make_student(first_name="Ben", last_name="Adams")
+    await make_enrollment(student_zephyr.id, klass.id, status=EnrollmentStatus.ACTIVE)
+    await make_enrollment(student_adams.id, klass.id, status=EnrollmentStatus.ACTIVE)
+    # student_adams graded on both; student_zephyr graded on the quiz only —
+    # exercises both a real score and an explicit null (ungraded) entry.
+    await make_grade(quiz.id, student_adams.id, score=Decimal("18.00"))
+    await make_grade(exam.id, student_adams.id, score=Decimal("85.00"))
+    await make_grade(quiz.id, student_zephyr.id, score=Decimal("15.00"))
+    headers = await make_manage_headers(email="admin-gradebook1@example.com")
+
+    response = await client.get(f"/classes/{klass.id}/gradebook", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["class_id"] == str(klass.id)
+    assert [a["assessment_id"] for a in body["assessments"]] == [str(quiz.id), str(exam.id)]
+    assert [a["name"] for a in body["assessments"]] == ["Quiz 1", "Midterm"]
+
+    assert [s["student_id"] for s in body["students"]] == [
+        str(student_adams.id),
+        str(student_zephyr.id),
+    ]
+
+    adams_row = body["students"][0]
+    assert adams_row["scores"] == {str(quiz.id): "18.00", str(exam.id): "85.00"}
+
+    zephyr_row = body["students"][1]
+    assert zephyr_row["scores"] == {str(quiz.id): "15.00", str(exam.id): None}
+
+
+async def test_get_gradebook_dropped_student_excluded(
+    client: AsyncClient,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollment: Callable[..., Awaitable[Enrollment]],
+    make_assessment: Callable[..., Awaitable[Assessment]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, teacher.id)
+    await make_assessment(klass.id)
+    active_student = await make_student(email="active-dropcheck@example.com")
+    dropped_student = await make_student(email="dropped-dropcheck@example.com")
+    await make_enrollment(active_student.id, klass.id, status=EnrollmentStatus.ACTIVE)
+    await make_enrollment(dropped_student.id, klass.id, status=EnrollmentStatus.DROPPED)
+    headers = await make_manage_headers(email="admin-gradebook2@example.com")
+
+    response = await client.get(f"/classes/{klass.id}/gradebook", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [s["student_id"] for s in body["students"]] == [str(active_student.id)]
+
+
+async def test_get_gradebook_missing_class_returns_404(
+    client: AsyncClient, make_manage_headers: Callable[..., Awaitable[dict[str, str]]]
+) -> None:
+    headers = await make_manage_headers(email="admin-gradebook3@example.com")
+
+    response = await client.get(f"/classes/{uuid4()}/gradebook", headers=headers)
+
+    assert response.status_code == 404
+    assert "detail" in response.json()
+
+
+async def test_get_gradebook_without_token_returns_401(
+    client: AsyncClient,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+) -> None:
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, teacher.id)
+
+    response = await client.get(f"/classes/{klass.id}/gradebook")
+
+    assert response.status_code == 401
+
+
+async def test_get_gradebook_as_teacher_who_owns_class_returns_200(
+    client: AsyncClient,
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+
+    response = await client.get(f"/classes/{owned_class.id}/gradebook", headers=teacher_headers)
+
+    assert response.status_code == 200
+    assert response.json()["class_id"] == str(owned_class.id)
+
+
+async def test_get_gradebook_as_teacher_not_owning_class_returns_403(
+    client: AsyncClient,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    subject = await make_subject()
+    term = await make_term()
+    other_teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, other_teacher.id)  # owned by another teacher
+    _teacher, teacher_headers = await make_teacher_with_headers()
+
+    response = await client.get(f"/classes/{klass.id}/gradebook", headers=teacher_headers)
+
+    assert response.status_code == 403
+
+
+async def test_get_gradebook_as_admin_succeeds_regardless_of_ownership(
+    client: AsyncClient,
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    teacher, _teacher_headers = await make_teacher_with_headers()
+    someone_elses_class = await make_class_for_teacher(teacher.id)
+    admin_headers = await make_manage_headers(email="admin-gradebook-owner-check@example.com")
+
+    response = await client.get(
+        f"/classes/{someone_elses_class.id}/gradebook", headers=admin_headers
+    )
+
+    assert response.status_code == 200
+
+
+async def test_get_gradebook_as_student_role_returns_403_even_for_own_enrolled_class(
+    client: AsyncClient,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_enrollment: Callable[..., Awaitable[Enrollment]],
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, teacher.id)
+    own_student, own_student_headers = await make_student_with_headers()
+    await make_enrollment(own_student.id, klass.id, status=EnrollmentStatus.ACTIVE)
+
+    response = await client.get(f"/classes/{klass.id}/gradebook", headers=own_student_headers)
+
+    assert response.status_code == 403

@@ -1,3 +1,14 @@
+# Several fakes below define a method literally named `list` (mirroring the
+# real repositories' pagination method) followed by another method whose
+# return annotation is `list[...]` (e.g. `list_by_class_id`) — without this,
+# that later annotation would resolve `list` against the *method* named
+# `list` already bound in the class namespace, not the builtin, and raise
+# TypeError at class-definition time. Same fix as
+# src/sms/domains/classes/repository.py's identical comment; deferring
+# annotation evaluation to strings sidesteps the whole class of ordering
+# bugs instead of requiring every fake to carefully order its methods.
+from __future__ import annotations
+
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -17,6 +28,7 @@ from sms.domains.assessments.models import Assessment, AssessmentType, Grade
 from sms.domains.assessments.schemas import (
     AssessmentCreate,
     AssessmentUpdate,
+    ClassGradebookRead,
     GradeCreate,
     GradeUpdate,
 )
@@ -86,6 +98,14 @@ class FakeAssessmentRepository(AbstractRepository[Assessment]):
 
     async def remove(self, entity: Assessment) -> None:
         self._assessments.pop(entity.id, None)
+
+    async def list_by_class_id(self, class_id: UUID) -> list[Assessment]:
+        # Ordered by date ascending — a gradebook's columns read left-to-right
+        # in chronological order, unlike list()'s newest-first pagination
+        # contract (created_at desc), which is about "recently added", not
+        # "when did this happen".
+        matching = [a for a in self._assessments.values() if a.class_id == class_id]
+        return sorted(matching, key=lambda a: a.date)
 
 
 class FakeGradeRepository(AbstractRepository[Grade]):
@@ -164,6 +184,9 @@ class FakeGradeRepository(AbstractRepository[Grade]):
                 return grade
         return None
 
+    async def list_by_assessment_ids(self, assessment_ids: list[UUID]) -> list[Grade]:
+        return [g for g in self._grades.values() if g.assessment_id in assessment_ids]
+
 
 class FakeClassRepository(AbstractRepository[Class]):
     """Minimal in-memory stand-in for ClassRepository — AssessmentService
@@ -228,6 +251,9 @@ class FakeStudentRepository(AbstractRepository[Student]):
                 return student
         return None
 
+    async def list_by_ids(self, ids: list[UUID]) -> list[Student]:
+        return [s for s in self._students.values() if s.id in ids]
+
 
 class FakeTeacherRepository(AbstractRepository[Teacher]):
     """Minimal in-memory stand-in for TeacherRepository. get_by_user_id is
@@ -289,6 +315,14 @@ class FakeEnrollmentRepository(AbstractRepository[Enrollment]):
             if enrollment.student_id == student_id and enrollment.class_id == class_id:
                 return enrollment
         return None
+
+    async def list_by_class_id(
+        self, class_id: UUID, *, status: EnrollmentStatus | None = None
+    ) -> list[Enrollment]:
+        results = [e for e in self._enrollments.values() if e.class_id == class_id]
+        if status is not None:
+            results = [e for e in results if e.status == status]
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -1679,3 +1713,159 @@ async def test_update_grade_as_admin_succeeds_regardless_of_ownership(
     updated = await grade_service.update(admin_user, grade.id, GradeUpdate(score=Decimal("80.00")))
 
     assert updated.score == Decimal("80.00")
+
+
+# ---------------------------------------------------------------------------
+# GradeService.get_class_gradebook
+# ---------------------------------------------------------------------------
+
+
+async def test_get_class_gradebook_assembles_correct_columns_rows_and_scores(
+    grade_service: GradeService,
+    admin_user: User,
+    assessment_repository: FakeAssessmentRepository,
+    student_repository: FakeStudentRepository,
+    enrollment_repository: FakeEnrollmentRepository,
+    klass: Class,
+) -> None:
+    # Dates deliberately out of insertion order — columns must come back
+    # sorted by date ascending, not creation order.
+    quiz = await assessment_repository.add(
+        make_assessment_instance(
+            class_id=klass.id, name="Quiz 1", date=date(2024, 9, 5), max_score=Decimal("20.00")
+        )
+    )
+    exam = await assessment_repository.add(
+        make_assessment_instance(
+            class_id=klass.id, name="Midterm", date=date(2024, 10, 15), max_score=Decimal("100.00")
+        )
+    )
+    # Last names deliberately out of insertion order — rows must come back
+    # sorted by (last_name, first_name), not creation order.
+    student_zephyr = await student_repository.add(
+        make_student_instance(first_name="Amy", last_name="Zephyr")
+    )
+    student_adams = await student_repository.add(
+        make_student_instance(first_name="Ben", last_name="Adams")
+    )
+    for s in (student_zephyr, student_adams):
+        await enrollment_repository.add(
+            make_enrollment_instance(
+                student_id=s.id, class_id=klass.id, status=EnrollmentStatus.ACTIVE
+            )
+        )
+    # student_adams graded on both; student_zephyr graded on the quiz only —
+    # exercises both a real score and an explicit None (ungraded) entry.
+    await grade_service.create(
+        admin_user, GradeCreate(assessment_id=quiz.id, student_id=student_adams.id, score=Decimal("18.00"))
+    )
+    await grade_service.create(
+        admin_user, GradeCreate(assessment_id=exam.id, student_id=student_adams.id, score=Decimal("85.00"))
+    )
+    await grade_service.create(
+        admin_user, GradeCreate(assessment_id=quiz.id, student_id=student_zephyr.id, score=Decimal("15.00"))
+    )
+
+    gradebook = await grade_service.get_class_gradebook(admin_user, klass.id)
+
+    assert isinstance(gradebook, ClassGradebookRead)
+    assert gradebook.class_id == klass.id
+    assert [c.assessment_id for c in gradebook.assessments] == [quiz.id, exam.id]
+    assert [c.name for c in gradebook.assessments] == ["Quiz 1", "Midterm"]
+
+    assert [r.student_id for r in gradebook.students] == [student_adams.id, student_zephyr.id]
+
+    adams_row = gradebook.students[0]
+    assert adams_row.scores == {quiz.id: Decimal("18.00"), exam.id: Decimal("85.00")}
+
+    zephyr_row = gradebook.students[1]
+    assert zephyr_row.scores == {quiz.id: Decimal("15.00"), exam.id: None}
+
+
+async def test_get_class_gradebook_dropped_student_excluded(
+    grade_service: GradeService,
+    admin_user: User,
+    assessment_repository: FakeAssessmentRepository,
+    student_repository: FakeStudentRepository,
+    enrollment_repository: FakeEnrollmentRepository,
+    klass: Class,
+) -> None:
+    await assessment_repository.add(make_assessment_instance(class_id=klass.id))
+    active_student = await student_repository.add(make_student_instance())
+    dropped_student = await student_repository.add(make_student_instance())
+    await enrollment_repository.add(
+        make_enrollment_instance(
+            student_id=active_student.id, class_id=klass.id, status=EnrollmentStatus.ACTIVE
+        )
+    )
+    await enrollment_repository.add(
+        make_enrollment_instance(
+            student_id=dropped_student.id, class_id=klass.id, status=EnrollmentStatus.DROPPED
+        )
+    )
+
+    gradebook = await grade_service.get_class_gradebook(admin_user, klass.id)
+
+    assert [r.student_id for r in gradebook.students] == [active_student.id]
+
+
+async def test_get_class_gradebook_no_assessments_or_students_returns_empty_lists(
+    grade_service: GradeService, admin_user: User, klass: Class
+) -> None:
+    gradebook = await grade_service.get_class_gradebook(admin_user, klass.id)
+
+    assert gradebook.assessments == []
+    assert gradebook.students == []
+
+
+async def test_get_class_gradebook_missing_class_raises(
+    grade_service: GradeService, admin_user: User
+) -> None:
+    with pytest.raises(ClassNotFoundError):
+        await grade_service.get_class_gradebook(admin_user, uuid4())
+
+
+async def test_get_class_gradebook_as_teacher_who_owns_class_succeeds(
+    grade_service: GradeService,
+    class_repository: FakeClassRepository,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+
+    gradebook = await grade_service.get_class_gradebook(teacher_user, owned_class.id)
+
+    assert gradebook.class_id == owned_class.id
+
+
+async def test_get_class_gradebook_as_teacher_not_owning_class_raises_not_your_class(
+    grade_service: GradeService, klass: Class, make_teacher_user
+) -> None:
+    # `klass` is owned by an unrelated random teacher_id, not this teacher.
+    teacher_user, _teacher = await make_teacher_user()
+
+    with pytest.raises(NotYourClassError):
+        await grade_service.get_class_gradebook(teacher_user, klass.id)
+
+
+async def test_get_class_gradebook_as_teacher_with_no_linked_teacher_record_raises_not_your_class(
+    grade_service: GradeService, klass: Class
+) -> None:
+    orphan_teacher_user = make_user_instance(role=UserRole.TEACHER)
+
+    with pytest.raises(NotYourClassError):
+        await grade_service.get_class_gradebook(orphan_teacher_user, klass.id)
+
+
+async def test_get_class_gradebook_as_admin_succeeds_regardless_of_ownership(
+    grade_service: GradeService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    make_teacher_user,
+) -> None:
+    _teacher_user, teacher = await make_teacher_user()
+    someone_elses_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+
+    gradebook = await grade_service.get_class_gradebook(admin_user, someone_elses_class.id)
+
+    assert gradebook.class_id == someone_elses_class.id
