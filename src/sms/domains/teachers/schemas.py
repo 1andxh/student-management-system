@@ -35,6 +35,14 @@ class TeacherRead(TeacherBase):
     updated_at: datetime
 
 
+class TeacherCredentialsRead(BaseModel):
+    """The raw password appears here once, on generation/reset, and nowhere
+    else — never persisted, never logged, not part of TeacherRead."""
+
+    email: str
+    password: str
+
+
 class TeacherChangeRequestCreate(BaseModel):
     first_name: str | None = None
     last_name: str | None = None

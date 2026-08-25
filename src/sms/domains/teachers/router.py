@@ -6,17 +6,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sms.core.pagination import Pagination, pagination_params
 from sms.db.session import get_db
 from sms.domains.auth.dependencies import get_current_user, require_role
+from sms.domains.classes.models import Class
+from sms.domains.classes.repository import ClassRepository
+from sms.domains.classes.schemas import ClassRead
 from sms.domains.teachers.models import Teacher, TeacherChangeRequest
 from sms.domains.teachers.repository import TeacherChangeRequestRepository, TeacherRepository
 from sms.domains.teachers.schemas import (
     TeacherChangeRequestCreate,
     TeacherChangeRequestRead,
     TeacherCreate,
+    TeacherCredentialsRead,
     TeacherRead,
     TeacherUpdate,
 )
 from sms.domains.teachers.service import TeacherChangeRequestService, TeacherService
 from sms.domains.users.models import User, UserRole
+from sms.domains.users.repository import UserRepository
 
 router = APIRouter(prefix="/teachers", tags=["teachers"])
 
@@ -27,7 +32,7 @@ _admin_only = require_role(UserRole.ADMIN)
 
 
 def get_teacher_service(session: AsyncSession = Depends(get_db)) -> TeacherService:
-    return TeacherService(TeacherRepository(session))
+    return TeacherService(TeacherRepository(session), UserRepository(session), ClassRepository(session))
 
 
 def get_change_request_service(
@@ -36,7 +41,7 @@ def get_change_request_service(
     return TeacherChangeRequestService(
         TeacherChangeRequestRepository(session),
         TeacherRepository(session),
-        TeacherService(TeacherRepository(session)),
+        TeacherService(TeacherRepository(session), UserRepository(session), ClassRepository(session)),
     )
 
 
@@ -76,6 +81,14 @@ async def get_my_teacher(
     service: TeacherChangeRequestService = Depends(get_change_request_service),
 ) -> Teacher:
     return await service.get_my_teacher(current_user.id)
+
+
+@router.get("/me/classes", response_model=list[ClassRead])
+async def get_my_classes(
+    current_user: User = Depends(get_current_user),
+    service: TeacherService = Depends(get_teacher_service),
+) -> list[Class]:
+    return await service.get_my_classes(current_user.id)
 
 
 @router.post(
@@ -157,6 +170,17 @@ async def delete_teacher(
     teacher_id: UUID, service: TeacherService = Depends(get_teacher_service)
 ) -> None:
     await service.delete(teacher_id)
+
+
+@router.post(
+    "/{teacher_id}/credentials",
+    response_model=TeacherCredentialsRead,
+    dependencies=[Depends(_admin_only)],
+)
+async def generate_teacher_credentials(
+    teacher_id: UUID, service: TeacherService = Depends(get_teacher_service)
+) -> TeacherCredentialsRead:
+    return await service.generate_credentials(teacher_id)
 
 
 @router.post(

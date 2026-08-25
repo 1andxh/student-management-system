@@ -17,6 +17,7 @@ from sms.domains.teachers.schemas import (
     TeacherChangeRequestCreate,
     TeacherChangeRequestRead,
     TeacherCreate,
+    TeacherCredentialsRead,
     TeacherRead,
     TeacherUpdate,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "TeacherChangeRequestCreate",
     "TeacherChangeRequestRead",
     "TeacherCreate",
+    "TeacherCredentialsRead",
     "TeacherRead",
     "TeacherUpdate",
     "TeacherChangeRequestService",

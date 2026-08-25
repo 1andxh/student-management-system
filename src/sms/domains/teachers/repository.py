@@ -12,15 +12,30 @@ class TeacherRepository(AbstractRepository[Teacher]):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def add(self, entity: Teacher) -> Teacher:
+    async def add(self, entity: Teacher, *, commit: bool = True) -> Teacher:
         self._session.add(entity)
         try:
-            await self._session.commit()
+            if commit:
+                await self._session.commit()
+            else:
+                # Flush (not commit) still executes the INSERT/UPDATE and
+                # populates server-generated defaults, without ending the
+                # transaction — used when this write must commit atomically
+                # together with a UserRepository write (see
+                # TeacherService.generate_credentials, mirroring
+                # StudentService.generate_pin's identical pattern).
+                await self._session.flush()
         except Exception:
             await self._session.rollback()
             raise
         await self._session.refresh(entity)
         return entity
+
+    async def commit(self) -> None:
+        await self._session.commit()
+
+    async def rollback(self) -> None:
+        await self._session.rollback()
 
     async def get(self, entity_id: UUID) -> Teacher | None:
         return await self._session.get(Teacher, entity_id)
