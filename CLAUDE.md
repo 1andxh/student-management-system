@@ -4,7 +4,7 @@ This file is project-specific — it supplements, not replaces, `~/.claude/CLAUD
 
 ## Orchestration guardrails (you are the orchestrator here)
 
-- **Every `Agent` tool call goes through `agent-relay`** — log to `THINKING.md`/`LIVE.md` before and after, no exceptions. These files are gitignored; they're a live transcript for Solomon, not a deliverable.
+- **Every `Agent` tool call goes through `agent-relay`** — log to `THINKING.md`/`LIVE.md` before and after, no exceptions. These files are gitignored; they're a live transcript for the user, not a deliverable.
 - **Run the `agent-team` gate check before delegating, every time** — don't delegate work that's tightly-coupled, first-of-its-kind, or small enough that writing the contract costs more than doing it. A real example from this project: Stage 1/2's domain implementation stayed in the main thread; only test-writing against an already-settled contract was delegated. Don't force multi-agent patterns onto something that doesn't need them just to look like the harness is being used — that's the opposite of the point.
 - **The established TDD-delegation shape**: fully settle the contract yourself first (models, schemas, service method signatures, exceptions, route shapes) — write it out in full, don't hand-wave it — then dispatch `qa-engineer` to write tests against that contract while implementing in the main thread *in parallel*, not sequentially. Confirm genuine red state before implementing (the subagent should actually run the tests and paste real output, not assert it would fail).
 - **`security-auditor` reviews any change touching auth, sessions, secrets, or RBAC before that stage is called done** — not optional, not just for the initial auth stage. Give it a neutral brief; don't pre-flag your own suspicions, the value is its independence.
@@ -25,4 +25,4 @@ This file is project-specific — it supplements, not replaces, `~/.claude/CLAUD
 
 Numbered ADRs are the durable record of *why* things are the way they are: domain-oriented architecture + repository pattern (0002), auth domain boundaries (0006), the create/uniqueness-race pattern every domain's `create()` should follow (0004), security review findings and what's deliberately deferred (0008). Read the relevant ones before proposing a structural change — if a pattern here looks like it could be simplified, it was probably already discussed once.
 
-Git: split commits (one file each, matching Solomon's global convention), short headline, `Co-Authored-By` trailer. Never commit or push without being asked.
+Git: split commits (one file each, matching the user's global convention), short headline, `~claude` trailer (not `Co-Authored-By`). Never commit or push without being asked.
