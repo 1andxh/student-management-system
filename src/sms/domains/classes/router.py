@@ -6,6 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sms.core.pagination import Pagination, pagination_params
 from sms.db.session import get_db
 from sms.domains.academic_years.repository import TermRepository
+from sms.domains.assessments.repository import AssessmentRepository, GradeRepository
+from sms.domains.assessments.schemas import ClassGradebookRead
+from sms.domains.assessments.service import GradeService
 from sms.domains.auth.dependencies import get_current_user, require_role
 from sms.domains.classes.models import Class, Subject
 from sms.domains.classes.repository import ClassRepository, SubjectRepository
@@ -18,13 +21,16 @@ from sms.domains.classes.schemas import (
     SubjectUpdate,
 )
 from sms.domains.classes.service import ClassService, SubjectService
+from sms.domains.enrollments.repository import EnrollmentRepository
+from sms.domains.students.repository import StudentRepository
 from sms.domains.teachers.repository import TeacherRepository
-from sms.domains.users.models import UserRole
+from sms.domains.users.models import User, UserRole
 
 subjects_router = APIRouter(prefix="/subjects", tags=["subjects"])
 classes_router = APIRouter(prefix="/classes", tags=["classes"])
 
 _admin_only = require_role(UserRole.ADMIN)
+_admin_or_teacher = require_role(UserRole.ADMIN, UserRole.TEACHER)
 
 
 def get_subject_service(session: AsyncSession = Depends(get_db)) -> SubjectService:
@@ -36,6 +42,21 @@ def get_class_service(session: AsyncSession = Depends(get_db)) -> ClassService:
         ClassRepository(session),
         SubjectRepository(session),
         TermRepository(session),
+        TeacherRepository(session),
+    )
+
+
+def get_grade_service(session: AsyncSession = Depends(get_db)) -> GradeService:
+    # Duplicated wiring rather than imported from assessments/router.py —
+    # matches this codebase's existing convention of every router file
+    # building its own get_X_service providers instead of cross-importing
+    # them.
+    return GradeService(
+        GradeRepository(session),
+        AssessmentRepository(session),
+        StudentRepository(session),
+        EnrollmentRepository(session),
+        ClassRepository(session),
         TeacherRepository(session),
     )
 
@@ -151,3 +172,16 @@ async def delete_class(
     class_id: UUID, service: ClassService = Depends(get_class_service)
 ) -> None:
     await service.delete(class_id)
+
+
+@classes_router.get(
+    "/{class_id}/gradebook",
+    response_model=ClassGradebookRead,
+    dependencies=[Depends(_admin_or_teacher)],
+)
+async def get_class_gradebook(
+    class_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: GradeService = Depends(get_grade_service),
+) -> ClassGradebookRead:
+    return await service.get_class_gradebook(current_user, class_id)

@@ -1,3 +1,10 @@
+# list_by_class_id / list_by_assessment_ids (added below) would otherwise
+# shadow the builtin `list` used in this same class's own `list()` method's
+# `-> list[...]` annotation if evaluated eagerly — the exact bug ADR
+# 0018/0019 already hit twice. Lazy string annotations sidestep it
+# regardless of method order.
+from __future__ import annotations
+
 from uuid import UUID
 
 from sqlalchemy import select
@@ -43,6 +50,14 @@ class AssessmentRepository(AbstractRepository[Assessment]):
     async def remove(self, entity: Assessment) -> None:
         await self._session.delete(entity)
         await self._session.commit()
+
+    async def list_by_class_id(self, class_id: UUID) -> list[Assessment]:
+        # Chronological, not created_at desc like list() above — a
+        # gradebook's natural column order.
+        result = await self._session.execute(
+            select(Assessment).where(Assessment.class_id == class_id).order_by(Assessment.date)
+        )
+        return list(result.scalars().all())
 
 
 class GradeRepository(AbstractRepository[Grade]):
@@ -101,3 +116,11 @@ class GradeRepository(AbstractRepository[Grade]):
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_by_assessment_ids(self, assessment_ids: list[UUID]) -> list[Grade]:
+        if not assessment_ids:
+            return []
+        result = await self._session.execute(
+            select(Grade).where(Grade.assessment_id.in_(assessment_ids))
+        )
+        return list(result.scalars().all())

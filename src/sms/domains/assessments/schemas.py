@@ -56,3 +56,28 @@ class GradeRead(BaseModel):
     student_id: UUID
     score: Decimal
     graded_at: datetime
+
+
+class GradebookAssessmentColumn(BaseModel):
+    assessment_id: UUID
+    name: str
+    type: AssessmentType
+    max_score: Decimal
+    date: date_type
+
+
+class GradebookStudentRow(BaseModel):
+    student_id: UUID
+    student_number: str
+    first_name: str
+    last_name: str
+    # Keyed by assessment_id, not positionally aligned to the assessments
+    # list — a dict is self-describing and can't silently desync the way a
+    # same-length parallel array could. None = ungraded, never omitted.
+    scores: dict[UUID, Decimal | None]
+
+
+class ClassGradebookRead(BaseModel):
+    class_id: UUID
+    assessments: list[GradebookAssessmentColumn]
+    students: list[GradebookStudentRow]

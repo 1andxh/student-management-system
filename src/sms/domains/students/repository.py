@@ -1,3 +1,9 @@
+# list_by_ids (added below) would otherwise shadow the builtin `list` used
+# in this same class's own `list()` method's `-> tuple[list[Student], int]`
+# annotation if evaluated eagerly — the exact bug ADR 0018/0019 already hit
+# twice. Lazy string annotations sidestep it regardless of method order.
+from __future__ import annotations
+
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -63,3 +69,9 @@ class StudentRepository(AbstractRepository[Student]):
     async def next_student_number_seq(self) -> int:
         result = await self._session.execute(text("SELECT nextval('student_number_seq')"))
         return result.scalar_one()
+
+    async def list_by_ids(self, ids: list[UUID]) -> list[Student]:
+        if not ids:
+            return []
+        result = await self._session.execute(select(Student).where(Student.id.in_(ids)))
+        return list(result.scalars().all())

@@ -11,7 +11,15 @@ from sms.domains.assessments.exceptions import (
 )
 from sms.domains.assessments.models import Assessment, Grade
 from sms.domains.assessments.repository import AssessmentRepository, GradeRepository
-from sms.domains.assessments.schemas import AssessmentCreate, AssessmentUpdate, GradeCreate, GradeUpdate
+from sms.domains.assessments.schemas import (
+    AssessmentCreate,
+    AssessmentUpdate,
+    ClassGradebookRead,
+    GradebookAssessmentColumn,
+    GradebookStudentRow,
+    GradeCreate,
+    GradeUpdate,
+)
 from sms.domains.classes.exceptions import ClassNotFoundError, NotYourClassError
 from sms.domains.classes.models import Class
 from sms.domains.classes.repository import ClassRepository
@@ -322,3 +330,57 @@ class GradeService:
 
         grade.score = data.score
         return await self._repository.add(grade)
+
+    async def _check_owns_class(self, current_user: User, cls: Class) -> None:
+        # Distinct from _check_owns_assessments_class above — that one
+        # starts from an Assessment and resolves its Class; the gradebook
+        # already has the Class in hand, so this small local helper takes
+        # it directly rather than round-tripping through a fake Assessment.
+        if current_user.role != UserRole.TEACHER:
+            return
+        my_teacher_id = await self._get_my_teacher_id(current_user)
+        if my_teacher_id is None or cls.teacher_id != my_teacher_id:
+            raise NotYourClassError()
+
+    async def get_class_gradebook(self, current_user: User, class_id: UUID) -> ClassGradebookRead:
+        cls = await self._class_repository.get(class_id)
+        if cls is None:
+            raise ClassNotFoundError()
+        await self._check_owns_class(current_user, cls)
+
+        assessments = await self._assessment_repository.list_by_class_id(class_id)
+        # ACTIVE only — matches Stage 7's existing "grading requires active
+        # enrollment" rule (StudentNotEnrolledError above). A DROPPED or
+        # COMPLETED student's grades still exist as Grade rows but don't
+        # appear in this view — confirmed scope, not an oversight.
+        enrollments = await self._enrollment_repository.list_by_class_id(
+            class_id, status=EnrollmentStatus.ACTIVE
+        )
+        students = await self._student_repository.list_by_ids(
+            [e.student_id for e in enrollments]
+        )
+        students_by_id = {s.id: s for s in students}
+
+        grades = await self._repository.list_by_assessment_ids([a.id for a in assessments])
+        grade_map = {(g.student_id, g.assessment_id): g.score for g in grades}
+
+        rows = [
+            GradebookStudentRow(
+                student_id=student.id,
+                student_number=student.student_number,
+                first_name=student.first_name,
+                last_name=student.last_name,
+                scores={a.id: grade_map.get((student.id, a.id)) for a in assessments},
+            )
+            for student in sorted(
+                (students_by_id[e.student_id] for e in enrollments if e.student_id in students_by_id),
+                key=lambda s: (s.last_name, s.first_name),
+            )
+        ]
+        columns = [
+            GradebookAssessmentColumn(
+                assessment_id=a.id, name=a.name, type=a.type, max_score=a.max_score, date=a.date
+            )
+            for a in assessments
+        ]
+        return ClassGradebookRead(class_id=class_id, assessments=columns, students=rows)
