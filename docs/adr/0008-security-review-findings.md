@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-Per ADR 0006/the `agent-team` skill's own guidance, an independent `security-auditor` review was run against the Stage 2 auth implementation before considering it done. It returned 5 findings. Two carried no real tradeoff and were applied immediately; two carried genuine tradeoffs and were brought to Solomon as explicit questions rather than resolved unilaterally — both were approved and applied; one was noted as forward-looking only.
+Per ADR 0006/the `agent-team` skill's own guidance, an independent `security-auditor` review was run against the Stage 2 auth implementation before considering it done. It returned 5 findings. Two carried no real tradeoff and were applied immediately; two carried genuine tradeoffs and were brought to the user as explicit questions rather than resolved unilaterally — both were approved and applied; one was noted as forward-looking only.
 
 ## Decision
 **Applied directly** (no real tradeoff, clear improvement):

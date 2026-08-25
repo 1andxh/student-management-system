@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-ADR 0008's Finding 4 flagged that access tokens have no server-side revocation — a compromised token, or a user who wants to log out, has no way to invalidate a token before it naturally expires. Solomon raised this directly as a follow-up, proposing a refresh-token/session mechanism and asking specifically whether a separate orchestrating class between auth/session/refresh made sense, and whether `user_agent`/`ip_address` belonged on the session record.
+ADR 0008's Finding 4 flagged that access tokens have no server-side revocation — a compromised token, or a user who wants to log out, has no way to invalidate a token before it naturally expires. The user raised this directly as a follow-up, proposing a refresh-token/session mechanism and asking specifically whether a separate orchestrating class between auth/session/refresh made sense, and whether `user_agent`/`ip_address` belonged on the session record.
 
 ## Decision
 - **`Session` is the aggregate, not a bare `RefreshToken` list.** One row per logged-in device/browser (`src/sms/domains/auth/models.py`), holding the *current* refresh token for that session rather than a history of every token ever issued.

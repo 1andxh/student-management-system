@@ -4,10 +4,10 @@
 Accepted
 
 ## Context
-Two testing conventions were settled during Stage 2, both raised directly by Solomon rather than pre-planned:
+Two testing conventions were settled during Stage 2, both raised directly by the user rather than pre-planned:
 
-1. Stage 1 established shared test setup helpers (`create_student_via_db`, and Stage 2's `create_user_via_db`/`auth_headers`) as plain functions, explicitly imported into each test file (`from tests.conftest import ...`). This required `tests/__init__.py` and `tests/domains/__init__.py` to exist so the import path resolved — their absence caused a real `ModuleNotFoundError` mid-stage. Solomon then asked directly why these weren't pytest factory fixtures instead.
-2. Each domain's tests lived flat as `tests/domains/<name>/test_service.py` (unit, fake repository) and `test_router.py` (integration, real Postgres) side by side. Solomon asked for these to be explicitly separated into unit/integration.
+1. Stage 1 established shared test setup helpers (`create_student_via_db`, and Stage 2's `create_user_via_db`/`auth_headers`) as plain functions, explicitly imported into each test file (`from tests.conftest import ...`). This required `tests/__init__.py` and `tests/domains/__init__.py` to exist so the import path resolved — their absence caused a real `ModuleNotFoundError` mid-stage. The user then asked directly why these weren't pytest factory fixtures instead.
+2. Each domain's tests lived flat as `tests/domains/<name>/test_service.py` (unit, fake repository) and `test_router.py` (integration, real Postgres) side by side. The user asked for these to be explicitly separated into unit/integration.
 
 ## Decision
 - **Shared test setup helpers are factory fixtures, not plain imported functions.** `tests/conftest.py` defines `make_user` and `auth_headers` as `@pytest.fixture`s returning callables; domain-local equivalents (e.g. `make_student` in `tests/domains/students/integration/test_router.py`) follow the same pattern, defined locally until a second domain needs them, at which point they're promoted to the shared `conftest.py`. Pytest auto-discovers fixtures via its own conftest mechanism — no cross-file imports needed, which also sidesteps the import-path fragility that caused the `ModuleNotFoundError` above.

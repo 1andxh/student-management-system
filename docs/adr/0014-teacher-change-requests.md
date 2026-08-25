@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-Stage 3b, raised directly by Solomon while Stage 3 (Teachers, ADR 0013) was in flight: teachers can't directly edit their own `Teacher` record (mutations are `ADMIN`-only, staff/HR data). Rather than either leaving teachers with no path to correct their own info or opening `Teacher` mutations back up, a request/approve flow gives them a narrow, admin-gated path. Two real forks were raised as explicit questions before building, not decided silently: which fields are requestable, and whether a teacher can have more than one pending request at once.
+Stage 3b, raised directly by the user while Stage 3 (Teachers, ADR 0013) was in flight: teachers can't directly edit their own `Teacher` record (mutations are `ADMIN`-only, staff/HR data). Rather than either leaving teachers with no path to correct their own info or opening `Teacher` mutations back up, a request/approve flow gives them a narrow, admin-gated path. Two real forks were raised as explicit questions before building, not decided silently: which fields are requestable, and whether a teacher can have more than one pending request at once.
 
 ## Decision
 - **Requestable fields are `first_name`/`last_name`/`email` only.** `hire_date` (a historical HR fact) and `user_id` (account-linkage, security-sensitive) stay admin-only-direct via the existing `PATCH /teachers/{id}` — never routed through approval.

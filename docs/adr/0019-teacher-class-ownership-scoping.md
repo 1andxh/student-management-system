@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-`security-auditor`'s Stage 7 review (ADR 0018) flagged, as an out-of-scope observation rather than a bug in what it was reviewing: any `TEACHER`-role user could read/write assessments and grades for *every* class, not just ones they actually teach. Solomon asked to resolve this before moving to Stage 8 (polish). Two real forks were raised and confirmed before building: whether the fix covers `Assessment` as well as `Grade` (yes), and whether it covers reads as well as writes (yes).
+`security-auditor`'s Stage 7 review (ADR 0018) flagged, as an out-of-scope observation rather than a bug in what it was reviewing: any `TEACHER`-role user could read/write assessments and grades for *every* class, not just ones they actually teach. The user asked to resolve this before moving to Stage 8 (polish). Two real forks were raised and confirmed before building: whether the fix covers `Assessment` as well as `Grade` (yes), and whether it covers reads as well as writes (yes).
 
 ## Decision
 - **Only `TEACHER` is restricted.** `ADMIN`/`SUPER_ADMIN` are fully unrestricted, unchanged. A `TEACHER`'s "own classes" = `Class` rows where `Class.teacher_id` matches their own linked `Teacher.id`, resolved via `TeacherRepository.get_by_user_id(current_user.id)` — the same lookup shape as the student self-view scoping (ADR 0018), now duplicated as a private helper in both `AssessmentService` and `GradeService` rather than shared, matching this codebase's existing preference for small per-service helpers over a shared base class.
