@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from sms.core.repository import AbstractRepository
-from sms.domains.classes.exceptions import ClassNotFoundError
+from sms.domains.classes.exceptions import ClassNotFoundError, NotYourClassError
 from sms.domains.classes.models import Class
 from sms.domains.enrollments.exceptions import (
     ClassFullError,
@@ -18,6 +18,8 @@ from sms.domains.enrollments.schemas import EnrollmentCreate
 from sms.domains.enrollments.service import EnrollmentService
 from sms.domains.students.exceptions import StudentNotFoundError
 from sms.domains.students.models import Student
+from sms.domains.teachers.models import Teacher
+from sms.domains.users.models import User, UserRole
 
 # Arbitrary fixed epoch — only used as a base for the fake's deterministic,
 # monotonically increasing enrolled_at stamps, same pattern as
@@ -30,7 +32,11 @@ class FakeEnrollmentRepository(AbstractRepository[Enrollment]):
     uq_enrollments_student_class the same "pre-check narrows the window,
     doesn't close it" way as every other domain's fake (see docs/adr/0004) —
     it's the IntegrityError EnrollmentService.enroll's try/except is meant
-    to catch when the pre-check misses a race. list() mirrors the real
+    to catch when the pre-check misses a race. list()'s class_ids filter
+    mirrors AssessmentRepository/GradeRepository's class_id/class_ids split
+    (tests/domains/assessments/unit/test_service.py) — class_id (singular)
+    is the pre-existing explicit filter, class_ids (plural) is the new
+    TEACHER-ownership scoping filter. list() otherwise mirrors the real
     repository's pagination contract (sorted newest-first by enrolled_at)."""
 
     def __init__(self) -> None:
@@ -59,6 +65,7 @@ class FakeEnrollmentRepository(AbstractRepository[Enrollment]):
         *,
         student_id: UUID | None = None,
         class_id: UUID | None = None,
+        class_ids: list[UUID] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[Enrollment], int]:
@@ -67,6 +74,8 @@ class FakeEnrollmentRepository(AbstractRepository[Enrollment]):
             results = [e for e in results if e.student_id == student_id]
         if class_id is not None:
             results = [e for e in results if e.class_id == class_id]
+        if class_ids is not None:
+            results = [e for e in results if e.class_id in class_ids]
         results.sort(key=lambda e: e.enrolled_at, reverse=True)
         return results[offset : offset + limit], len(results)
 
@@ -94,7 +103,9 @@ class FakeClassRepository(AbstractRepository[Class]):
     behaves identically to get() here — a single-threaded unit test has no
     concurrent transaction for a real row lock to matter against; the
     lock's actual concurrency-safety is code-review-verified, not something
-    this fake needs to (or can) simulate."""
+    this fake needs to (or can) simulate. list_by_teacher_id() is the new
+    TEACHER-ownership scoping lookup, mirroring
+    tests/domains/assessments/unit/test_service.py's identical fake."""
 
     def __init__(self) -> None:
         self._classes: dict[UUID, Class] = {}
@@ -107,6 +118,13 @@ class FakeClassRepository(AbstractRepository[Class]):
 
     async def get(self, entity_id: UUID) -> Class | None:
         return self._classes.get(entity_id)
+
+    # Deliberately defined before `list` below — a method named `list`
+    # shadows the builtin `list` for any annotation evaluated afterwards in
+    # this same class body. See the identical comment in
+    # tests/domains/assessments/unit/test_service.py's FakeClassRepository.
+    async def list_by_teacher_id(self, teacher_id: UUID) -> list[Class]:
+        return [c for c in self._classes.values() if c.teacher_id == teacher_id]
 
     async def list(self) -> list[Class]:
         return list(self._classes.values())
@@ -141,6 +159,37 @@ class FakeStudentRepository(AbstractRepository[Student]):
         self._students.pop(entity.id, None)
 
 
+class FakeTeacherRepository(AbstractRepository[Teacher]):
+    """Minimal in-memory stand-in for TeacherRepository. get_by_user_id is
+    exercised directly by EnrollmentService's new _get_my_teacher_id-style
+    ownership helper — same shape/reasoning as
+    tests/domains/assessments/unit/test_service.py's identical fake."""
+
+    def __init__(self) -> None:
+        self._teachers: dict[UUID, Teacher] = {}
+
+    async def add(self, entity: Teacher) -> Teacher:
+        if entity.id is None:
+            entity.id = uuid4()
+        self._teachers[entity.id] = entity
+        return entity
+
+    async def get(self, entity_id: UUID) -> Teacher | None:
+        return self._teachers.get(entity_id)
+
+    async def list(self) -> list[Teacher]:
+        return list(self._teachers.values())
+
+    async def remove(self, entity: Teacher) -> None:
+        self._teachers.pop(entity.id, None)
+
+    async def get_by_user_id(self, user_id: UUID) -> Teacher | None:
+        for teacher in self._teachers.values():
+            if teacher.user_id == user_id:
+                return teacher
+        return None
+
+
 def make_student_instance(**overrides: object) -> Student:
     defaults: dict[str, object] = {
         "id": uuid4(),
@@ -169,6 +218,31 @@ def make_class_instance(**overrides: object) -> Class:
     return Class(**defaults)
 
 
+def make_user_instance(**overrides: object) -> User:
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "email": f"{uuid4().hex[:8]}@example.com",
+        "hashed_password": "not-a-real-hash",
+        "role": UserRole.ADMIN,
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return User(**defaults)
+
+
+def make_teacher_instance(**overrides: object) -> Teacher:
+    defaults: dict[str, object] = {
+        "id": uuid4(),
+        "user_id": None,
+        "first_name": "Grace",
+        "last_name": "Hopper",
+        "email": f"teacher{uuid4().hex[:8]}@example.com",
+        "hire_date": date(2015, 6, 1),
+    }
+    defaults.update(overrides)
+    return Teacher(**defaults)
+
+
 # ---------------------------------------------------------------------------
 # fixtures
 # ---------------------------------------------------------------------------
@@ -190,12 +264,20 @@ def student_repository() -> FakeStudentRepository:
 
 
 @pytest.fixture
+def teacher_repository() -> FakeTeacherRepository:
+    return FakeTeacherRepository()
+
+
+@pytest.fixture
 def enrollment_service(
     enrollment_repository: FakeEnrollmentRepository,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
+    teacher_repository: FakeTeacherRepository,
 ) -> EnrollmentService:
-    return EnrollmentService(enrollment_repository, class_repository, student_repository)
+    return EnrollmentService(
+        enrollment_repository, class_repository, student_repository, teacher_repository
+    )
 
 
 @pytest.fixture
@@ -208,16 +290,38 @@ async def klass(class_repository: FakeClassRepository) -> Class:
     return await class_repository.add(make_class_instance(capacity=30))
 
 
+@pytest.fixture
+def admin_user() -> User:
+    return make_user_instance(role=UserRole.ADMIN)
+
+
+@pytest.fixture
+def make_teacher_user(teacher_repository: FakeTeacherRepository):
+    """Factory: create a TEACHER-role User linked to a new Teacher record
+    via user_id. Returns (user, teacher) — the caller assigns
+    Class.teacher_id = teacher.id itself when it needs a class this teacher
+    owns, or uses an unrelated class/teacher_id for the not-owned case.
+    Mirrors tests/domains/assessments/unit/test_service.py's identical
+    fixture."""
+
+    async def _make() -> tuple[User, Teacher]:
+        user = make_user_instance(role=UserRole.TEACHER)
+        teacher = await teacher_repository.add(make_teacher_instance(user_id=user.id))
+        return user, teacher
+
+    return _make
+
+
 # ---------------------------------------------------------------------------
 # enroll
 # ---------------------------------------------------------------------------
 
 
 async def test_enroll_success(
-    enrollment_service: EnrollmentService, student: Student, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
 ) -> None:
     enrollment = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
     )
 
     assert enrollment.id is not None
@@ -227,36 +331,39 @@ async def test_enroll_success(
 
 
 async def test_enroll_nonexistent_student_raises(
-    enrollment_service: EnrollmentService, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, klass: Class
 ) -> None:
     with pytest.raises(StudentNotFoundError):
         await enrollment_service.enroll(
-            EnrollmentCreate(student_id=uuid4(), class_id=klass.id)
+            admin_user, EnrollmentCreate(student_id=uuid4(), class_id=klass.id)
         )
 
 
 async def test_enroll_nonexistent_class_raises(
-    enrollment_service: EnrollmentService, student: Student
+    enrollment_service: EnrollmentService, admin_user: User, student: Student
 ) -> None:
     with pytest.raises(ClassNotFoundError):
         await enrollment_service.enroll(
-            EnrollmentCreate(student_id=student.id, class_id=uuid4())
+            admin_user, EnrollmentCreate(student_id=student.id, class_id=uuid4())
         )
 
 
 async def test_enroll_already_enrolled_raises(
-    enrollment_service: EnrollmentService, student: Student, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
 ) -> None:
-    await enrollment_service.enroll(EnrollmentCreate(student_id=student.id, class_id=klass.id))
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
 
     with pytest.raises(EnrollmentAlreadyExistsError):
         await enrollment_service.enroll(
-            EnrollmentCreate(student_id=student.id, class_id=klass.id)
+            admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
         )
 
 
 async def test_enroll_class_at_capacity_raises(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -265,17 +372,18 @@ async def test_enroll_class_at_capacity_raises(
     second_student = await student_repository.add(make_student_instance())
 
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=first_student.id, class_id=full_class.id)
+        admin_user, EnrollmentCreate(student_id=first_student.id, class_id=full_class.id)
     )
 
     with pytest.raises(ClassFullError):
         await enrollment_service.enroll(
-            EnrollmentCreate(student_id=second_student.id, class_id=full_class.id)
+            admin_user, EnrollmentCreate(student_id=second_student.id, class_id=full_class.id)
         )
 
 
 async def test_enroll_succeeds_up_to_exactly_capacity(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -284,14 +392,70 @@ async def test_enroll_succeeds_up_to_exactly_capacity(
     second_student = await student_repository.add(make_student_instance())
 
     first = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=first_student.id, class_id=two_seat_class.id)
+        admin_user, EnrollmentCreate(student_id=first_student.id, class_id=two_seat_class.id)
     )
     second = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=second_student.id, class_id=two_seat_class.id)
+        admin_user, EnrollmentCreate(student_id=second_student.id, class_id=two_seat_class.id)
     )
 
     assert first.status == EnrollmentStatus.ACTIVE
     assert second.status == EnrollmentStatus.ACTIVE
+
+
+async def test_enroll_as_teacher_who_owns_class_succeeds(
+    enrollment_service: EnrollmentService,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+
+    enrollment = await enrollment_service.enroll(
+        teacher_user, EnrollmentCreate(student_id=student.id, class_id=owned_class.id)
+    )
+
+    assert enrollment.class_id == owned_class.id
+
+
+async def test_enroll_as_teacher_not_owning_class_raises_not_your_class(
+    enrollment_service: EnrollmentService, student: Student, klass: Class, make_teacher_user
+) -> None:
+    # `klass` is owned by an unrelated random teacher_id, not this teacher.
+    teacher_user, _teacher = await make_teacher_user()
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.enroll(
+            teacher_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        )
+
+
+async def test_enroll_as_teacher_with_no_linked_teacher_record_raises_not_your_class(
+    enrollment_service: EnrollmentService, student: Student, klass: Class
+) -> None:
+    orphan_teacher_user = make_user_instance(role=UserRole.TEACHER)  # no linked Teacher record
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.enroll(
+            orphan_teacher_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        )
+
+
+async def test_enroll_as_admin_succeeds_regardless_of_ownership(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    _teacher_user, teacher = await make_teacher_user()
+    someone_elses_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+
+    enrollment = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=someone_elses_class.id)
+    )
+
+    assert enrollment.class_id == someone_elses_class.id
 
 
 # ---------------------------------------------------------------------------
@@ -300,20 +464,84 @@ async def test_enroll_succeeds_up_to_exactly_capacity(
 
 
 async def test_get_success(
-    enrollment_service: EnrollmentService, student: Student, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
 ) -> None:
     created = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
     )
 
-    fetched = await enrollment_service.get(created.id)
+    fetched = await enrollment_service.get(admin_user, created.id)
 
     assert fetched.id == created.id
 
 
-async def test_get_missing_raises(enrollment_service: EnrollmentService) -> None:
+async def test_get_missing_raises(enrollment_service: EnrollmentService, admin_user: User) -> None:
     with pytest.raises(EnrollmentNotFoundError):
-        await enrollment_service.get(uuid4())
+        await enrollment_service.get(admin_user, uuid4())
+
+
+async def test_get_as_teacher_who_owns_class_succeeds(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=owned_class.id)
+    )
+
+    fetched = await enrollment_service.get(teacher_user, created.id)
+
+    assert fetched.id == created.id
+
+
+async def test_get_as_teacher_not_owning_class_raises_not_your_class(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    student: Student,
+    klass: Class,
+    make_teacher_user,
+) -> None:
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    teacher_user, _teacher = await make_teacher_user()
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.get(teacher_user, created.id)
+
+
+async def test_get_as_teacher_with_no_linked_teacher_record_raises_not_your_class(
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
+) -> None:
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    orphan_teacher_user = make_user_instance(role=UserRole.TEACHER)
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.get(orphan_teacher_user, created.id)
+
+
+async def test_get_as_admin_succeeds_regardless_of_ownership(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    _teacher_user, teacher = await make_teacher_user()
+    someone_elses_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=someone_elses_class.id)
+    )
+
+    fetched = await enrollment_service.get(admin_user, created.id)
+
+    assert fetched.id == created.id
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +551,7 @@ async def test_get_missing_raises(enrollment_service: EnrollmentService) -> None
 
 async def test_list_no_filters_returns_everything(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -331,13 +560,13 @@ async def test_list_no_filters_returns_everything(
     student_a = await student_repository.add(make_student_instance())
     student_b = await student_repository.add(make_student_instance())
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_b.id, class_id=class_b.id)
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_b.id)
     )
 
-    enrollments, total = await enrollment_service.list(limit=50, offset=0)
+    enrollments, total = await enrollment_service.list(admin_user, limit=50, offset=0)
 
     assert len(enrollments) == 2
     assert total == 2
@@ -345,6 +574,7 @@ async def test_list_no_filters_returns_everything(
 
 async def test_list_pagination_smoke(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -352,10 +582,10 @@ async def test_list_pagination_smoke(
         klass = await class_repository.add(make_class_instance(capacity=10))
         student = await student_repository.add(make_student_instance())
         await enrollment_service.enroll(
-            EnrollmentCreate(student_id=student.id, class_id=klass.id)
+            admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
         )
 
-    page, total = await enrollment_service.list(limit=2, offset=0)
+    page, total = await enrollment_service.list(admin_user, limit=2, offset=0)
 
     assert len(page) == 2
     assert total == 3
@@ -363,6 +593,7 @@ async def test_list_pagination_smoke(
 
 async def test_list_filtered_by_student_id(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -371,16 +602,18 @@ async def test_list_filtered_by_student_id(
     student_a = await student_repository.add(make_student_instance())
     student_b = await student_repository.add(make_student_instance())
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
     )
 
-    enrollments, total = await enrollment_service.list(student_id=student_a.id, limit=50, offset=0)
+    enrollments, total = await enrollment_service.list(
+        admin_user, student_id=student_a.id, limit=50, offset=0
+    )
 
     assert len(enrollments) == 2
     assert total == 2
@@ -389,6 +622,7 @@ async def test_list_filtered_by_student_id(
 
 async def test_list_filtered_by_class_id(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -397,16 +631,18 @@ async def test_list_filtered_by_class_id(
     student_a = await student_repository.add(make_student_instance())
     student_b = await student_repository.add(make_student_instance())
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
     )
 
-    enrollments, total = await enrollment_service.list(class_id=class_a.id, limit=50, offset=0)
+    enrollments, total = await enrollment_service.list(
+        admin_user, class_id=class_a.id, limit=50, offset=0
+    )
 
     assert len(enrollments) == 2
     assert total == 2
@@ -415,6 +651,7 @@ async def test_list_filtered_by_class_id(
 
 async def test_list_filtered_by_both(
     enrollment_service: EnrollmentService,
+    admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
 ) -> None:
@@ -423,22 +660,144 @@ async def test_list_filtered_by_both(
     student_a = await student_repository.add(make_student_instance())
     student_b = await student_repository.add(make_student_instance())
     target = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_b.id)
     )
     await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_a.id)
     )
 
     enrollments, total = await enrollment_service.list(
-        student_id=student_a.id, class_id=class_a.id, limit=50, offset=0
+        admin_user, student_id=student_a.id, class_id=class_a.id, limit=50, offset=0
     )
 
     assert len(enrollments) == 1
     assert total == 1
     assert enrollments[0].id == target.id
+
+
+async def test_list_as_teacher_omitted_class_id_restricted_to_own_classes(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student_repository: FakeStudentRepository,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    other_class = await class_repository.add(make_class_instance())
+    owned_student = await student_repository.add(make_student_instance())
+    other_student = await student_repository.add(make_student_instance())
+    owned_enrollment = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=owned_student.id, class_id=owned_class.id)
+    )
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=other_student.id, class_id=other_class.id)
+    )
+
+    enrollments, total = await enrollment_service.list(teacher_user, limit=50, offset=0)
+
+    assert total == 1
+    assert [e.id for e in enrollments] == [owned_enrollment.id]
+
+
+async def test_list_as_teacher_explicit_owned_class_id_succeeds(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student_repository: FakeStudentRepository,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    other_owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    student_a = await student_repository.add(make_student_instance())
+    student_b = await student_repository.add(make_student_instance())
+    target = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=owned_class.id)
+    )
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=other_owned_class.id)
+    )
+
+    enrollments, total = await enrollment_service.list(
+        teacher_user, class_id=owned_class.id, limit=50, offset=0
+    )
+
+    assert total == 1
+    assert [e.id for e in enrollments] == [target.id]
+
+
+async def test_list_as_teacher_explicit_not_owned_class_id_raises_not_your_class(
+    enrollment_service: EnrollmentService, klass: Class, make_teacher_user
+) -> None:
+    # `klass` (owned by an unrelated random teacher_id) is passed explicitly
+    # as the class_id filter — an explicit request for a class this teacher
+    # doesn't teach must be rejected outright, not silently ignored/filtered
+    # (same interaction Assessment/GradeService already established).
+    teacher_user, _teacher = await make_teacher_user()
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.list(teacher_user, class_id=klass.id, limit=50, offset=0)
+
+
+async def test_list_as_teacher_with_no_linked_teacher_record_returns_empty(
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
+) -> None:
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    orphan_teacher_user = make_user_instance(role=UserRole.TEACHER)
+
+    enrollments, total = await enrollment_service.list(orphan_teacher_user, limit=50, offset=0)
+
+    assert enrollments == []
+    assert total == 0
+
+
+async def test_list_as_teacher_owning_zero_classes_returns_empty_not_error(
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class, make_teacher_user
+) -> None:
+    # A linked Teacher record that simply doesn't teach anything yet — must
+    # behave the same as the no-linked-record case (empty list), not raise.
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    teacher_user, _teacher = await make_teacher_user()
+
+    enrollments, total = await enrollment_service.list(teacher_user, limit=50, offset=0)
+
+    assert enrollments == []
+    assert total == 0
+
+
+async def test_list_as_student_role_unaffected_by_teacher_scoping(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student_repository: FakeStudentRepository,
+) -> None:
+    # STUDENT (any non-TEACHER, non-ADMIN/SUPER_ADMIN role) must see the
+    # same unrestricted result set as before this stage — the new ownership
+    # check only ever applies to role == TEACHER.
+    class_a = await class_repository.add(make_class_instance(capacity=10))
+    class_b = await class_repository.add(make_class_instance(capacity=10))
+    student_a = await student_repository.add(make_student_instance())
+    student_b = await student_repository.add(make_student_instance())
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+    )
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_b.id)
+    )
+    student_role_user = make_user_instance(role=UserRole.STUDENT)
+
+    enrollments, total = await enrollment_service.list(student_role_user, limit=50, offset=0)
+
+    assert total == 2
+    assert len(enrollments) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -447,30 +806,82 @@ async def test_list_filtered_by_both(
 
 
 async def test_drop_success(
-    enrollment_service: EnrollmentService, student: Student, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
 ) -> None:
     created = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
     )
 
-    dropped = await enrollment_service.drop(created.id)
+    dropped = await enrollment_service.drop(admin_user, created.id)
 
     assert dropped.id == created.id
     assert dropped.status == EnrollmentStatus.DROPPED
 
 
 async def test_drop_already_dropped_raises(
-    enrollment_service: EnrollmentService, student: Student, klass: Class
+    enrollment_service: EnrollmentService, admin_user: User, student: Student, klass: Class
 ) -> None:
     created = await enrollment_service.enroll(
-        EnrollmentCreate(student_id=student.id, class_id=klass.id)
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
     )
-    await enrollment_service.drop(created.id)
+    await enrollment_service.drop(admin_user, created.id)
 
     with pytest.raises(EnrollmentNotActiveError):
-        await enrollment_service.drop(created.id)
+        await enrollment_service.drop(admin_user, created.id)
 
 
-async def test_drop_missing_raises(enrollment_service: EnrollmentService) -> None:
+async def test_drop_missing_raises(enrollment_service: EnrollmentService, admin_user: User) -> None:
     with pytest.raises(EnrollmentNotFoundError):
-        await enrollment_service.drop(uuid4())
+        await enrollment_service.drop(admin_user, uuid4())
+
+
+async def test_drop_as_teacher_who_owns_class_succeeds(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    teacher_user, teacher = await make_teacher_user()
+    owned_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=owned_class.id)
+    )
+
+    dropped = await enrollment_service.drop(teacher_user, created.id)
+
+    assert dropped.status == EnrollmentStatus.DROPPED
+
+
+async def test_drop_as_teacher_not_owning_class_raises_not_your_class(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    student: Student,
+    klass: Class,
+    make_teacher_user,
+) -> None:
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    teacher_user, _teacher = await make_teacher_user()
+
+    with pytest.raises(NotYourClassError):
+        await enrollment_service.drop(teacher_user, created.id)
+
+
+async def test_drop_as_admin_succeeds_regardless_of_ownership(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student: Student,
+    make_teacher_user,
+) -> None:
+    _teacher_user, teacher = await make_teacher_user()
+    someone_elses_class = await class_repository.add(make_class_instance(teacher_id=teacher.id))
+    created = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=someone_elses_class.id)
+    )
+
+    dropped = await enrollment_service.drop(admin_user, created.id)
+
+    assert dropped.status == EnrollmentStatus.DROPPED

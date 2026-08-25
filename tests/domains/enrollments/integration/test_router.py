@@ -190,6 +190,50 @@ def make_manage_headers(
     return _make_headers
 
 
+@pytest.fixture
+def make_class_for_teacher(
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_class: Callable[..., Awaitable[Class]],
+):
+    """Like make_enrollable_class, but for a specific teacher_id — used to
+    build a Class actually owned (or not owned) by a given Teacher for the
+    TEACHER class-ownership scoping tests. Mirrors
+    tests/domains/assessments/integration/test_router.py's fixture of the
+    same name."""
+
+    async def _make(teacher_id: object, capacity: int = 30, **overrides: object) -> Class:
+        subject = await make_subject()
+        term = await make_term()
+        return await make_class(subject.id, term.id, teacher_id, capacity=capacity, **overrides)
+
+    return _make
+
+
+@pytest.fixture
+def make_teacher_with_headers(
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+):
+    """Creates a User (role=TEACHER) AND a Teacher record linked to that
+    same user via user_id — needed for the TEACHER class-ownership scoping
+    tests, since EnrollmentService resolves "my own teacher record" via
+    TeacherRepository.get_by_user_id(current_user.id). Mirrors
+    tests/domains/assessments/integration/test_router.py's fixture of the
+    same name."""
+
+    async def _make(**overrides: object) -> tuple[Teacher, dict[str, str]]:
+        unique = uuid4().hex[:8]
+        user_overrides: dict[str, object] = {"email": f"teacheruser{unique}@example.com"}
+        user_overrides.update(overrides)
+        user = await make_user(role=UserRole.TEACHER, **user_overrides)
+        teacher = await make_teacher(user_id=user.id, email=f"teacherrec{unique}@example.com")
+        return teacher, auth_headers(user)
+
+    return _make
+
+
 # ---------------------------------------------------------------------------
 # POST /enrollments
 # ---------------------------------------------------------------------------
@@ -560,3 +604,287 @@ async def test_patch_drop_enrollment_as_student_role_returns_403(
     )
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# TEACHER class-ownership scoping (mirrors ADR 0019's Assessment/Grade
+# pattern, docs/adr/0019 and tests/domains/assessments/integration/
+# test_router.py)
+# ---------------------------------------------------------------------------
+
+
+async def test_post_enrollments_as_teacher_who_owns_class_succeeds(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+
+    response = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, owned_class.id),
+        headers=teacher_headers,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["class_id"] == str(owned_class.id)
+
+
+async def test_post_enrollments_as_teacher_not_owning_class_returns_403(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()  # owned by an unrelated teacher
+    student = await make_student()
+    _teacher, teacher_headers = await make_teacher_with_headers()
+
+    response = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, klass.id),
+        headers=teacher_headers,
+    )
+
+    assert response.status_code == 403
+
+
+async def test_get_enrollments_list_as_teacher_omitted_class_id_restricted_to_own_classes(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+    other_class = await make_enrollable_class()
+    owned_student = await make_student()
+    other_student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-scope@example.com")
+    owned = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(owned_student.id, owned_class.id),
+        headers=admin_headers,
+    )
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(other_student.id, other_class.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get("/enrollments", headers=teacher_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [e["id"] for e in body] == [owned.json()["id"]]
+
+
+async def test_get_enrollments_list_as_teacher_explicit_owned_class_id_succeeds(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-explicit-owned@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, owned_class.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get(
+        "/enrollments", params={"class_id": str(owned_class.id)}, headers=teacher_headers
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["id"] == created.json()["id"]
+
+
+async def test_get_enrollments_list_as_teacher_explicit_not_owned_class_id_returns_403(
+    client: AsyncClient,
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()  # owned by an unrelated teacher
+    _teacher, teacher_headers = await make_teacher_with_headers()
+
+    response = await client.get(
+        "/enrollments", params={"class_id": str(klass.id)}, headers=teacher_headers
+    )
+
+    assert response.status_code == 403
+
+
+async def test_get_enrollments_list_as_teacher_owning_zero_classes_returns_empty_not_error(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-zero-classes@example.com")
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, klass.id),
+        headers=admin_headers,
+    )
+    _teacher, teacher_headers = await make_teacher_with_headers()  # owns nothing
+
+    response = await client.get("/enrollments", headers=teacher_headers)
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_get_enrollments_list_as_admin_unaffected_by_teacher_scoping(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, _teacher_headers = await make_teacher_with_headers()
+    someone_elses_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-unaffected@example.com")
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, someone_elses_class.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get("/enrollments", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert len(response.json()) == 1
+
+
+async def test_get_enrollment_by_id_as_teacher_who_owns_class_succeeds(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-get-own@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, owned_class.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+
+    response = await client.get(f"/enrollments/{enrollment_id}", headers=teacher_headers)
+
+    assert response.status_code == 200
+    assert response.json()["id"] == enrollment_id
+
+
+async def test_get_enrollment_by_id_as_teacher_not_owning_class_returns_403(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()  # owned by an unrelated teacher
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-get-notown@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, klass.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+    _teacher, teacher_headers = await make_teacher_with_headers()
+
+    response = await client.get(f"/enrollments/{enrollment_id}", headers=teacher_headers)
+
+    assert response.status_code == 403
+
+
+async def test_patch_drop_enrollment_as_teacher_who_owns_class_succeeds(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, teacher_headers = await make_teacher_with_headers()
+    owned_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-drop-own@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, owned_class.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+
+    response = await client.patch(f"/enrollments/{enrollment_id}/drop", headers=teacher_headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dropped"
+
+
+async def test_patch_drop_enrollment_as_teacher_not_owning_class_returns_403(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()  # owned by an unrelated teacher
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-drop-notown@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, klass.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+    _teacher, teacher_headers = await make_teacher_with_headers()
+
+    response = await client.patch(f"/enrollments/{enrollment_id}/drop", headers=teacher_headers)
+
+    assert response.status_code == 403
+
+
+async def test_patch_drop_enrollment_as_admin_unaffected_by_teacher_scoping(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_class_for_teacher: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_teacher_with_headers: Callable[..., Awaitable[tuple[Teacher, dict[str, str]]]],
+) -> None:
+    teacher, _teacher_headers = await make_teacher_with_headers()
+    someone_elses_class = await make_class_for_teacher(teacher.id)
+    student = await make_student()
+    admin_headers = await make_manage_headers(email="admin-enroll-drop-unaffected@example.com")
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, someone_elses_class.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+
+    response = await client.patch(f"/enrollments/{enrollment_id}/drop", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "dropped"
