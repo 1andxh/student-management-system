@@ -12,7 +12,8 @@ from sms.domains.enrollments.repository import EnrollmentRepository
 from sms.domains.enrollments.schemas import EnrollmentCreate, EnrollmentRead
 from sms.domains.enrollments.service import EnrollmentService
 from sms.domains.students.repository import StudentRepository
-from sms.domains.users.models import UserRole
+from sms.domains.teachers.repository import TeacherRepository
+from sms.domains.users.models import User, UserRole
 
 router = APIRouter(prefix="/enrollments", tags=["enrollments"])
 
@@ -24,7 +25,10 @@ _can_manage = require_role(UserRole.ADMIN, UserRole.TEACHER)
 
 def get_enrollment_service(session: AsyncSession = Depends(get_db)) -> EnrollmentService:
     return EnrollmentService(
-        EnrollmentRepository(session), ClassRepository(session), StudentRepository(session)
+        EnrollmentRepository(session),
+        ClassRepository(session),
+        StudentRepository(session),
+        TeacherRepository(session),
     )
 
 
@@ -35,21 +39,28 @@ def get_enrollment_service(session: AsyncSession = Depends(get_db)) -> Enrollmen
     dependencies=[Depends(_can_manage)],
 )
 async def enroll(
-    data: EnrollmentCreate, service: EnrollmentService = Depends(get_enrollment_service)
+    data: EnrollmentCreate,
+    current_user: User = Depends(get_current_user),
+    service: EnrollmentService = Depends(get_enrollment_service),
 ) -> Enrollment:
-    return await service.enroll(data)
+    return await service.enroll(current_user, data)
 
 
 @router.get("", response_model=list[EnrollmentRead], dependencies=[Depends(get_current_user)])
 async def list_enrollments(
     response: Response,
+    current_user: User = Depends(get_current_user),
     student_id: UUID | None = None,
     class_id: UUID | None = None,
     pagination: Pagination = Depends(pagination_params),
     service: EnrollmentService = Depends(get_enrollment_service),
 ) -> list[Enrollment]:
     items, total = await service.list(
-        limit=pagination.limit, offset=pagination.offset, student_id=student_id, class_id=class_id
+        current_user,
+        limit=pagination.limit,
+        offset=pagination.offset,
+        student_id=student_id,
+        class_id=class_id,
     )
     response.headers["X-Total-Count"] = str(total)
     return items
@@ -59,9 +70,11 @@ async def list_enrollments(
     "/{enrollment_id}", response_model=EnrollmentRead, dependencies=[Depends(get_current_user)]
 )
 async def get_enrollment(
-    enrollment_id: UUID, service: EnrollmentService = Depends(get_enrollment_service)
+    enrollment_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: EnrollmentService = Depends(get_enrollment_service),
 ) -> Enrollment:
-    return await service.get(enrollment_id)
+    return await service.get(current_user, enrollment_id)
 
 
 @router.patch(
@@ -70,6 +83,8 @@ async def get_enrollment(
     dependencies=[Depends(_can_manage)],
 )
 async def drop_enrollment(
-    enrollment_id: UUID, service: EnrollmentService = Depends(get_enrollment_service)
+    enrollment_id: UUID,
+    current_user: User = Depends(get_current_user),
+    service: EnrollmentService = Depends(get_enrollment_service),
 ) -> Enrollment:
-    return await service.drop(enrollment_id)
+    return await service.drop(current_user, enrollment_id)
