@@ -14,7 +14,13 @@ from sms.domains.teachers.exceptions import (
 from sms.domains.teachers.models import ChangeRequestStatus, TeacherChangeRequest
 from sms.domains.teachers.schemas import TeacherChangeRequestCreate
 from sms.domains.teachers.service import TeacherChangeRequestService, TeacherService
-from tests.domains.teachers.unit.test_service import FakeTeacherRepository, make_teacher_create
+from sms.domains.users.models import User, UserRole
+from tests.domains.teachers.unit.test_service import (
+    FakeClassRepository,
+    FakeTeacherRepository,
+    FakeUserRepository,
+    make_teacher_create,
+)
 
 # Arbitrary fixed epoch — only used as a base for the fake's deterministic,
 # monotonically increasing created_at stamps (see
@@ -70,8 +76,39 @@ def teacher_repository() -> FakeTeacherRepository:
 
 
 @pytest.fixture
-def teacher_service(teacher_repository: FakeTeacherRepository) -> TeacherService:
-    return TeacherService(teacher_repository)
+def user_repository() -> FakeUserRepository:
+    return FakeUserRepository()
+
+
+@pytest.fixture
+def teacher_service(
+    teacher_repository: FakeTeacherRepository, user_repository: FakeUserRepository
+) -> TeacherService:
+    # class_repository is only needed for get_my_classes, which
+    # TeacherChangeRequestService never calls — a fresh, empty fake is
+    # enough here. user_repository IS exposed (not a throwaway instance)
+    # because several tests below link a Teacher to a specific user_id via
+    # teacher_service.create(...), which now requires that user_id to
+    # resolve to a real, TEACHER-role User (_require_teacher_role_user).
+    return TeacherService(teacher_repository, user_repository, FakeClassRepository())
+
+
+async def _make_teacher_role_user(
+    user_repository: FakeUserRepository, **overrides: object
+) -> User:
+    """Local helper — every test below that links a Teacher to a user_id
+    needs a real, TEACHER-role User to link to first, now that
+    TeacherService._require_teacher_role_user validates that link (mirrors
+    the equivalent helper usage in tests/domains/teachers/unit/
+    test_service.py)."""
+    defaults: dict[str, object] = {
+        "email": f"link-{uuid4().hex[:8]}@example.com",
+        "hashed_password": "not-a-real-hash",
+        "role": UserRole.TEACHER,
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return await user_repository.add(User(**defaults))
 
 
 @pytest.fixture
@@ -91,14 +128,16 @@ def service(
 
 
 async def test_get_my_teacher_success(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
+    user = await _make_teacher_role_user(user_repository, email="linked@example.com")
     teacher = await teacher_service.create(
-        make_teacher_create(email="linked@example.com", user_id=user_id)
+        make_teacher_create(email="linked@example.com", user_id=user.id)
     )
 
-    fetched = await service.get_my_teacher(user_id)
+    fetched = await service.get_my_teacher(user.id)
 
     assert fetched.id == teacher.id
 
@@ -111,20 +150,22 @@ async def test_get_my_teacher_no_linked_record_raises(
 
 
 async def test_create_success(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
+    user = await _make_teacher_role_user(user_repository, email="create1@example.com")
     teacher = await teacher_service.create(
-        make_teacher_create(email="create1@example.com", user_id=user_id)
+        make_teacher_create(email="create1@example.com", user_id=user.id)
     )
 
     request = await service.create(
-        user_id, TeacherChangeRequestCreate(first_name="Augusta", email="augusta@example.com")
+        user.id, TeacherChangeRequestCreate(first_name="Augusta", email="augusta@example.com")
     )
 
     assert request.id is not None
     assert request.teacher_id == teacher.id
-    assert request.requested_by == user_id
+    assert request.requested_by == user.id
     assert request.proposed_changes == {
         "first_name": "Augusta",
         "email": "augusta@example.com",
@@ -135,12 +176,14 @@ async def test_create_success(
 
 
 async def test_create_partial_proposed_changes_email_only(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
-    await teacher_service.create(make_teacher_create(email="create2@example.com", user_id=user_id))
+    user = await _make_teacher_role_user(user_repository, email="create2@example.com")
+    await teacher_service.create(make_teacher_create(email="create2@example.com", user_id=user.id))
 
-    request = await service.create(user_id, TeacherChangeRequestCreate(email="new2@example.com"))
+    request = await service.create(user.id, TeacherChangeRequestCreate(email="new2@example.com"))
 
     assert request.proposed_changes == {"email": "new2@example.com"}
 
@@ -151,25 +194,29 @@ async def test_create_no_linked_teacher_raises(service: TeacherChangeRequestServ
 
 
 async def test_create_pending_request_exists_raises(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
-    await teacher_service.create(make_teacher_create(email="create3@example.com", user_id=user_id))
-    await service.create(user_id, TeacherChangeRequestCreate(first_name="First"))
+    user = await _make_teacher_role_user(user_repository, email="create3@example.com")
+    await teacher_service.create(make_teacher_create(email="create3@example.com", user_id=user.id))
+    await service.create(user.id, TeacherChangeRequestCreate(first_name="First"))
 
     with pytest.raises(PendingChangeRequestExistsError):
-        await service.create(user_id, TeacherChangeRequestCreate(first_name="Second"))
+        await service.create(user.id, TeacherChangeRequestCreate(first_name="Second"))
 
 
 async def test_list_all(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_a = uuid4()
-    user_b = uuid4()
-    await teacher_service.create(make_teacher_create(email="list1@example.com", user_id=user_a))
-    await teacher_service.create(make_teacher_create(email="list2@example.com", user_id=user_b))
-    await service.create(user_a, TeacherChangeRequestCreate(first_name="A"))
-    await service.create(user_b, TeacherChangeRequestCreate(first_name="B"))
+    user_a = await _make_teacher_role_user(user_repository, email="list-user-a@example.com")
+    user_b = await _make_teacher_role_user(user_repository, email="list-user-b@example.com")
+    await teacher_service.create(make_teacher_create(email="list1@example.com", user_id=user_a.id))
+    await teacher_service.create(make_teacher_create(email="list2@example.com", user_id=user_b.id))
+    await service.create(user_a.id, TeacherChangeRequestCreate(first_name="A"))
+    await service.create(user_b.id, TeacherChangeRequestCreate(first_name="B"))
 
     requests, total = await service.list_all(limit=50, offset=0)
 
@@ -178,14 +225,16 @@ async def test_list_all(
 
 
 async def test_list_all_pagination_smoke(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
     for i in range(3):
-        user_id = uuid4()
+        user = await _make_teacher_role_user(user_repository, email=f"listpg-user-{i}@example.com")
         await teacher_service.create(
-            make_teacher_create(email=f"listpg{i}@example.com", user_id=user_id)
+            make_teacher_create(email=f"listpg{i}@example.com", user_id=user.id)
         )
-        await service.create(user_id, TeacherChangeRequestCreate(first_name=f"Change{i}"))
+        await service.create(user.id, TeacherChangeRequestCreate(first_name=f"Change{i}"))
 
     page, total = await service.list_all(limit=2, offset=0)
 
@@ -197,15 +246,16 @@ async def test_approve_success_mutates_teacher(
     service: TeacherChangeRequestService,
     teacher_service: TeacherService,
     teacher_repository: FakeTeacherRepository,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
+    user = await _make_teacher_role_user(user_repository, email="approve1@example.com")
     teacher = await teacher_service.create(
         make_teacher_create(
-            email="approve1@example.com", first_name="Old", last_name="Name", user_id=user_id
+            email="approve1@example.com", first_name="Old", last_name="Name", user_id=user.id
         )
     )
     request = await service.create(
-        user_id, TeacherChangeRequestCreate(first_name="New", email="approved1@example.com")
+        user.id, TeacherChangeRequestCreate(first_name="New", email="approved1@example.com")
     )
     reviewer_id = uuid4()
 
@@ -228,11 +278,13 @@ async def test_approve_missing_raises(service: TeacherChangeRequestService) -> N
 
 
 async def test_approve_already_reviewed_raises(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
-    await teacher_service.create(make_teacher_create(email="approve2@example.com", user_id=user_id))
-    request = await service.create(user_id, TeacherChangeRequestCreate(first_name="X"))
+    user = await _make_teacher_role_user(user_repository, email="approve2@example.com")
+    await teacher_service.create(make_teacher_create(email="approve2@example.com", user_id=user.id))
+    request = await service.create(user.id, TeacherChangeRequestCreate(first_name="X"))
     reviewer_id = uuid4()
     await service.approve(request.id, reviewer_id)
 
@@ -241,13 +293,15 @@ async def test_approve_already_reviewed_raises(
 
 
 async def test_approve_propagates_uniqueness_conflict_and_stays_pending(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
+    user = await _make_teacher_role_user(user_repository, email="approve3@example.com")
     await teacher_service.create(make_teacher_create(email="taken@example.com"))
-    await teacher_service.create(make_teacher_create(email="approve3@example.com", user_id=user_id))
+    await teacher_service.create(make_teacher_create(email="approve3@example.com", user_id=user.id))
     request = await service.create(
-        user_id, TeacherChangeRequestCreate(email="taken@example.com")
+        user.id, TeacherChangeRequestCreate(email="taken@example.com")
     )
     reviewer_id = uuid4()
 
@@ -266,14 +320,15 @@ async def test_reject_success_leaves_teacher_unchanged(
     service: TeacherChangeRequestService,
     teacher_service: TeacherService,
     teacher_repository: FakeTeacherRepository,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
+    user = await _make_teacher_role_user(user_repository, email="reject1@example.com")
     teacher = await teacher_service.create(
         make_teacher_create(
-            email="reject1@example.com", first_name="Same", last_name="Name", user_id=user_id
+            email="reject1@example.com", first_name="Same", last_name="Name", user_id=user.id
         )
     )
-    request = await service.create(user_id, TeacherChangeRequestCreate(first_name="Different"))
+    request = await service.create(user.id, TeacherChangeRequestCreate(first_name="Different"))
     reviewer_id = uuid4()
 
     rejected = await service.reject(request.id, reviewer_id)
@@ -293,11 +348,13 @@ async def test_reject_missing_raises(service: TeacherChangeRequestService) -> No
 
 
 async def test_reject_already_reviewed_raises(
-    service: TeacherChangeRequestService, teacher_service: TeacherService
+    service: TeacherChangeRequestService,
+    teacher_service: TeacherService,
+    user_repository: FakeUserRepository,
 ) -> None:
-    user_id = uuid4()
-    await teacher_service.create(make_teacher_create(email="reject2@example.com", user_id=user_id))
-    request = await service.create(user_id, TeacherChangeRequestCreate(first_name="X"))
+    user = await _make_teacher_role_user(user_repository, email="reject2@example.com")
+    await teacher_service.create(make_teacher_create(email="reject2@example.com", user_id=user.id))
+    request = await service.create(user.id, TeacherChangeRequestCreate(first_name="X"))
     reviewer_id = uuid4()
     await service.reject(request.id, reviewer_id)
 
