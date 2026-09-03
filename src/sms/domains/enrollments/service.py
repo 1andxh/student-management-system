@@ -47,6 +47,10 @@ class EnrollmentService:
         self._student_repository = student_repository
         self._teacher_repository = teacher_repository
 
+    async def _get_my_student_id(self, current_user: User) -> UUID | None:
+        my_student = await self._student_repository.get_by_user_id(current_user.id)
+        return my_student.id if my_student is not None else None
+
     async def _get_my_teacher_id(self, current_user: User) -> UUID | None:
         my_teacher = await self._teacher_repository.get_by_user_id(current_user.id)
         return my_teacher.id if my_teacher is not None else None
@@ -89,7 +93,32 @@ class EnrollmentService:
             raise EnrollmentAlreadyExistsError() from exc
 
     async def get(self, current_user: User, enrollment_id: UUID) -> Enrollment:
+        # my_student_id is resolved before checking whether the enrollment
+        # exists, and both STUDENT failure branches below do the same
+        # amount of work — a nonexistent enrollment and someone else's
+        # enrollment must look identical from the outside, in timing as
+        # well as response body. Same shape as GradeService.get (the
+        # security-auditor finding behind docs/adr/0018).
+        my_student_id: UUID | None = None
+        if current_user.role == UserRole.STUDENT:
+            my_student_id = await self._get_my_student_id(current_user)
+
         enrollment = await self._repository.get(enrollment_id)
+
+        if current_user.role == UserRole.STUDENT:
+            # 404, not 403 — deliberately the opposite call from the
+            # TEACHER branch below. A Class's existence is already public
+            # via GET /classes, so NotYourClassError hides nothing; another
+            # student's enrollment is not public, so confirming it exists
+            # would itself be the leak. Same reasoning as docs/adr/0018.
+            if (
+                enrollment is None
+                or my_student_id is None
+                or enrollment.student_id != my_student_id
+            ):
+                raise EnrollmentNotFoundError()
+            return enrollment
+
         if enrollment is None:
             raise EnrollmentNotFoundError()
         if current_user.role == UserRole.TEACHER:
@@ -110,6 +139,18 @@ class EnrollmentService:
         student_id: UUID | None = None,
         class_id: UUID | None = None,
     ) -> tuple[list[Enrollment], int]:
+        if current_user.role == UserRole.STUDENT:
+            # Forces student_id to the caller's own, overriding whatever
+            # was passed — a STUDENT can still filter their own enrollments
+            # by class_id, but can never widen the scope past themselves.
+            # Same shape as GradeService.list (docs/adr/0018).
+            my_student_id = await self._get_my_student_id(current_user)
+            if my_student_id is None:
+                return [], 0
+            return await self._repository.list(
+                limit=limit, offset=offset, student_id=my_student_id, class_id=class_id
+            )
+
         if current_user.role == UserRole.TEACHER:
             my_teacher_id = await self._get_my_teacher_id(current_user)
             if my_teacher_id is None:
