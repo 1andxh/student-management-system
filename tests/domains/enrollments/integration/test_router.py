@@ -234,6 +234,29 @@ def make_teacher_with_headers(
     return _make
 
 
+@pytest.fixture
+def make_student_with_headers(
+    make_user: Callable[..., Awaitable[User]],
+    auth_headers: Callable[[User], dict[str, str]],
+    make_student: Callable[..., Awaitable[Student]],
+):
+    """Creates a User (role=STUDENT) AND a Student record linked to that
+    same user via user_id — the STUDENT-side mirror of
+    make_teacher_with_headers, for the self-scoping tests.
+    EnrollmentService resolves "my own student record" via
+    StudentRepository.get_by_user_id(current_user.id)."""
+
+    async def _make(**overrides: object) -> tuple[Student, dict[str, str]]:
+        unique = uuid4().hex[:8]
+        user_overrides: dict[str, object] = {"email": f"studentuser{unique}@example.com"}
+        user_overrides.update(overrides)
+        user = await make_user(role=UserRole.STUDENT, **user_overrides)
+        student = await make_student(user_id=user.id, email=f"studentrec{unique}@example.com")
+        return student, auth_headers(user)
+
+    return _make
+
+
 # ---------------------------------------------------------------------------
 # POST /enrollments
 # ---------------------------------------------------------------------------
@@ -888,3 +911,155 @@ async def test_patch_drop_enrollment_as_admin_unaffected_by_teacher_scoping(
 
     assert response.status_code == 200
     assert response.json()["status"] == "dropped"
+
+
+# ---------------------------------------------------------------------------
+# STUDENT self-scoping on reads
+# ---------------------------------------------------------------------------
+
+
+async def test_get_enrollments_as_student_returns_only_own(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()
+    admin_headers = await make_manage_headers(email="admin-selfscope1@example.com")
+    my_student, my_headers = await make_student_with_headers()
+    other_student = await make_student()
+    mine = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(my_student.id, klass.id),
+        headers=admin_headers,
+    )
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(other_student.id, klass.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get("/enrollments", headers=my_headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [e["id"] for e in body] == [mine.json()["id"]]
+    assert response.headers["X-Total-Count"] == "1"
+
+
+async def test_get_enrollments_as_student_ignores_other_student_id_filter(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    # Explicitly asking for a classmate's enrollments must not widen scope.
+    klass = await make_enrollable_class()
+    admin_headers = await make_manage_headers(email="admin-selfscope2@example.com")
+    my_student, my_headers = await make_student_with_headers()
+    other_student = await make_student()
+    mine = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(my_student.id, klass.id),
+        headers=admin_headers,
+    )
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(other_student.id, klass.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get(
+        "/enrollments", params={"student_id": str(other_student.id)}, headers=my_headers
+    )
+
+    assert response.status_code == 200
+    assert [e["id"] for e in response.json()] == [mine.json()["id"]]
+
+
+async def test_get_enrollment_by_id_as_student_own_succeeds(
+    client: AsyncClient,
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    klass = await make_enrollable_class()
+    admin_headers = await make_manage_headers(email="admin-selfscope3@example.com")
+    my_student, my_headers = await make_student_with_headers()
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(my_student.id, klass.id),
+        headers=admin_headers,
+    )
+    enrollment_id = created.json()["id"]
+
+    response = await client.get(f"/enrollments/{enrollment_id}", headers=my_headers)
+
+    assert response.status_code == 200
+    assert response.json()["id"] == enrollment_id
+
+
+async def test_get_enrollment_by_id_as_student_other_students_returns_404(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    # 404, not 403 — a classmate's enrollment must be indistinguishable
+    # from one that doesn't exist.
+    klass = await make_enrollable_class()
+    admin_headers = await make_manage_headers(email="admin-selfscope4@example.com")
+    _my_student, my_headers = await make_student_with_headers()
+    other_student = await make_student()
+    created = await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(other_student.id, klass.id),
+        headers=admin_headers,
+    )
+
+    response = await client.get(f"/enrollments/{created.json()['id']}", headers=my_headers)
+
+    assert response.status_code == 404
+
+
+async def test_get_enrollments_as_student_with_no_linked_record_returns_empty(
+    client: AsyncClient,
+    make_student: Callable[..., Awaitable[Student]],
+    make_enrollable_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    # A STUDENT-role account with no linked Student record owns nothing —
+    # empty list, not an error.
+    klass = await make_enrollable_class()
+    admin_headers = await make_manage_headers(email="admin-selfscope5@example.com")
+    student = await make_student()
+    await client.post(
+        "/enrollments",
+        json=make_enrollment_payload(student.id, klass.id),
+        headers=admin_headers,
+    )
+    orphan_headers = await make_manage_headers(
+        role=UserRole.STUDENT, email="orphan-student@example.com"
+    )
+
+    response = await client.get("/enrollments", headers=orphan_headers)
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert response.headers["X-Total-Count"] == "0"
+
+
+async def test_get_enrollment_by_id_as_student_nonexistent_returns_404(
+    client: AsyncClient,
+    make_student_with_headers: Callable[..., Awaitable[tuple[Student, dict[str, str]]]],
+) -> None:
+    # Same 404 a STUDENT gets for a classmate's enrollment — the two must
+    # be indistinguishable over HTTP, not just at the service layer.
+    _my_student, my_headers = await make_student_with_headers()
+
+    response = await client.get(f"/enrollments/{uuid4()}", headers=my_headers)
+
+    assert response.status_code == 404

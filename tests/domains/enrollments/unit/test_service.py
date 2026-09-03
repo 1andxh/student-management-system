@@ -137,8 +137,10 @@ class FakeClassRepository(AbstractRepository[Class]):
 
 
 class FakeStudentRepository(AbstractRepository[Student]):
-    """Minimal in-memory stand-in for StudentRepository — EnrollmentService
-    only ever calls .get() on it (existence check)."""
+    """Minimal in-memory stand-in for StudentRepository. EnrollmentService
+    calls .get() on it (existence check) and .get_by_user_id() (the STUDENT
+    self-scoping helper) — same shape/reasoning as
+    tests/domains/assessments/unit/test_service.py's identical fake."""
 
     def __init__(self) -> None:
         self._students: dict[UUID, Student] = {}
@@ -157,6 +159,12 @@ class FakeStudentRepository(AbstractRepository[Student]):
 
     async def remove(self, entity: Student) -> None:
         self._students.pop(entity.id, None)
+
+    async def get_by_user_id(self, user_id: UUID) -> Student | None:
+        for student in self._students.values():
+            if student.user_id == user_id:
+                return student
+        return None
 
 
 class FakeTeacherRepository(AbstractRepository[Teacher]):
@@ -308,6 +316,20 @@ def make_teacher_user(teacher_repository: FakeTeacherRepository):
         user = make_user_instance(role=UserRole.TEACHER)
         teacher = await teacher_repository.add(make_teacher_instance(user_id=user.id))
         return user, teacher
+
+    return _make
+
+
+@pytest.fixture
+def make_student_user(student_repository: FakeStudentRepository):
+    """Factory: create a STUDENT-role User linked to a new Student record
+    via user_id. Returns (user, student) — the STUDENT-side mirror of
+    make_teacher_user above, for the self-scoping tests."""
+
+    async def _make() -> tuple[User, Student]:
+        user = make_user_instance(role=UserRole.STUDENT)
+        student = await student_repository.add(make_student_instance(user_id=user.id))
+        return user, student
 
     return _make
 
@@ -773,31 +795,194 @@ async def test_list_as_teacher_owning_zero_classes_returns_empty_not_error(
     assert total == 0
 
 
-async def test_list_as_student_role_unaffected_by_teacher_scoping(
+# ---------------------------------------------------------------------------
+# STUDENT self-scoping (list + get)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_as_student_returns_only_own_enrollments(
     enrollment_service: EnrollmentService,
     admin_user: User,
     class_repository: FakeClassRepository,
     student_repository: FakeStudentRepository,
+    make_student_user,
 ) -> None:
-    # STUDENT (any non-TEACHER, non-ADMIN/SUPER_ADMIN role) must see the
-    # same unrestricted result set as before this stage — the new ownership
-    # check only ever applies to role == TEACHER.
+    # A STUDENT sees only their own enrollments — never a classmate's.
+    # Same self-scoping shape GradeService already applies (docs/adr/0018).
     class_a = await class_repository.add(make_class_instance(capacity=10))
     class_b = await class_repository.add(make_class_instance(capacity=10))
-    student_a = await student_repository.add(make_student_instance())
-    student_b = await student_repository.add(make_student_instance())
-    await enrollment_service.enroll(
-        admin_user, EnrollmentCreate(student_id=student_a.id, class_id=class_a.id)
+    student_user, my_student = await make_student_user()
+    other_student = await student_repository.add(make_student_instance())
+    mine = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=class_a.id)
     )
     await enrollment_service.enroll(
-        admin_user, EnrollmentCreate(student_id=student_b.id, class_id=class_b.id)
+        admin_user, EnrollmentCreate(student_id=other_student.id, class_id=class_b.id)
     )
-    student_role_user = make_user_instance(role=UserRole.STUDENT)
 
-    enrollments, total = await enrollment_service.list(student_role_user, limit=50, offset=0)
+    enrollments, total = await enrollment_service.list(student_user, limit=50, offset=0)
 
-    assert total == 2
-    assert len(enrollments) == 2
+    assert total == 1
+    assert [e.id for e in enrollments] == [mine.id]
+
+
+async def test_list_as_student_ignores_explicit_other_student_id_filter(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    student_repository: FakeStudentRepository,
+    make_student_user,
+) -> None:
+    # Passing someone else's student_id must not widen the scope — the
+    # caller's own id overrides whatever was supplied.
+    class_a = await class_repository.add(make_class_instance(capacity=10))
+    student_user, my_student = await make_student_user()
+    other_student = await student_repository.add(make_student_instance())
+    mine = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=class_a.id)
+    )
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=other_student.id, class_id=class_a.id)
+    )
+
+    enrollments, total = await enrollment_service.list(
+        student_user, limit=50, offset=0, student_id=other_student.id
+    )
+
+    assert total == 1
+    assert [e.id for e in enrollments] == [mine.id]
+
+
+async def test_list_as_student_can_still_filter_own_by_class_id(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    make_student_user,
+) -> None:
+    # Narrowing within their own scope still works — the override only
+    # pins student_id, it doesn't discard class_id.
+    class_a = await class_repository.add(make_class_instance(capacity=10))
+    class_b = await class_repository.add(make_class_instance(capacity=10))
+    student_user, my_student = await make_student_user()
+    in_a = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=class_a.id)
+    )
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=class_b.id)
+    )
+
+    enrollments, total = await enrollment_service.list(
+        student_user, limit=50, offset=0, class_id=class_a.id
+    )
+
+    assert total == 1
+    assert [e.id for e in enrollments] == [in_a.id]
+
+
+async def test_list_as_student_with_no_linked_record_returns_empty(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    student: Student,
+    klass: Class,
+) -> None:
+    # No linked Student record → owns nothing, same "empty scope, not an
+    # error" precedent as the no-linked-Teacher case.
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    orphan_student_user = make_user_instance(role=UserRole.STUDENT)
+
+    enrollments, total = await enrollment_service.list(orphan_student_user, limit=50, offset=0)
+
+    assert enrollments == []
+    assert total == 0
+
+
+async def test_get_as_student_own_enrollment_succeeds(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    klass: Class,
+    make_student_user,
+) -> None:
+    student_user, my_student = await make_student_user()
+    mine = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=klass.id)
+    )
+
+    fetched = await enrollment_service.get(student_user, mine.id)
+
+    assert fetched.id == mine.id
+
+
+async def test_get_as_student_other_students_enrollment_raises_not_found(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    student: Student,
+    klass: Class,
+    make_student_user,
+) -> None:
+    # 404, not 403 — a classmate's enrollment must be indistinguishable
+    # from one that doesn't exist, so the error itself can't confirm it's
+    # real (docs/adr/0018's reasoning, applied here).
+    theirs = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    student_user, _my_student = await make_student_user()
+
+    with pytest.raises(EnrollmentNotFoundError):
+        await enrollment_service.get(student_user, theirs.id)
+
+
+async def test_get_as_student_with_no_linked_record_raises_not_found(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    student: Student,
+    klass: Class,
+) -> None:
+    theirs = await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=student.id, class_id=klass.id)
+    )
+    orphan_student_user = make_user_instance(role=UserRole.STUDENT)
+
+    with pytest.raises(EnrollmentNotFoundError):
+        await enrollment_service.get(orphan_student_user, theirs.id)
+
+
+async def test_get_as_student_nonexistent_id_raises_not_found(
+    enrollment_service: EnrollmentService, make_student_user
+) -> None:
+    # The third of get()'s three STUDENT failure branches — a plain
+    # nonexistent id. Must be indistinguishable from "exists but isn't
+    # yours" (above) and "no linked record" (above): same exception, same
+    # message, same number of DB round-trips.
+    student_user, _my_student = await make_student_user()
+
+    with pytest.raises(EnrollmentNotFoundError):
+        await enrollment_service.get(student_user, uuid4())
+
+
+async def test_list_as_student_filtering_by_unenrolled_class_returns_empty(
+    enrollment_service: EnrollmentService,
+    admin_user: User,
+    class_repository: FakeClassRepository,
+    make_student_user,
+) -> None:
+    # A STUDENT asking about a class they aren't in gets an empty list, not
+    # NotYourClassError — that 403 belongs to the TEACHER branch only.
+    # Guards against a future reordering of the role branches in list().
+    my_class = await class_repository.add(make_class_instance(capacity=10))
+    other_class = await class_repository.add(make_class_instance(capacity=10))
+    student_user, my_student = await make_student_user()
+    await enrollment_service.enroll(
+        admin_user, EnrollmentCreate(student_id=my_student.id, class_id=my_class.id)
+    )
+
+    enrollments, total = await enrollment_service.list(
+        student_user, limit=50, offset=0, class_id=other_class.id
+    )
+
+    assert enrollments == []
+    assert total == 0
 
 
 # ---------------------------------------------------------------------------
