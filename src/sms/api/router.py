@@ -6,6 +6,7 @@ from sms.domains.audit.router import router as audit_router
 from sms.domains.auth.router import router as auth_router
 from sms.domains.classes.router import classes_router, subjects_router
 from sms.domains.enrollments.router import router as enrollments_router
+from sms.domains.sections.router import grade_levels_router, sections_router
 from sms.domains.students.router import router as students_router
 from sms.domains.teachers.router import router as teachers_router
 from sms.domains.users.router import router as users_router
@@ -27,6 +28,8 @@ api_router.include_router(students_router)
 api_router.include_router(teachers_router)
 api_router.include_router(academic_years_router)
 api_router.include_router(terms_router)
+api_router.include_router(grade_levels_router)
+api_router.include_router(sections_router)
 api_router.include_router(subjects_router)
 api_router.include_router(classes_router)
 api_router.include_router(enrollments_router)
