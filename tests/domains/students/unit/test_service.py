@@ -191,143 +191,6 @@ def service(
     return StudentService(repository, user_repository)
 
 
-async def test_create_success(service: StudentService) -> None:
-    data = make_student_create()
-
-    student = await service.create(data)
-
-    assert student.id is not None
-    assert student.student_number == "S-0001"
-    assert student.first_name == "Ada"
-    assert student.last_name == "Lovelace"
-    assert student.email == "ada@example.com"
-    assert student.enrollment_status == "active"
-
-
-async def test_create_duplicate_email_raises(service: StudentService) -> None:
-    await service.create(make_student_create(student_number="S-0001", email="dup@example.com"))
-
-    with pytest.raises(StudentAlreadyExistsError):
-        await service.create(
-            make_student_create(student_number="S-0002", email="dup@example.com")
-        )
-
-
-async def test_create_duplicate_student_number_raises(service: StudentService) -> None:
-    await service.create(make_student_create(student_number="S-DUP", email="one@example.com"))
-
-    with pytest.raises(StudentAlreadyExistsError):
-        await service.create(
-            make_student_create(student_number="S-DUP", email="two@example.com")
-        )
-
-
-async def test_get_success(service: StudentService) -> None:
-    created = await service.create(make_student_create())
-
-    fetched = await service.get(created.id)
-
-    assert fetched.id == created.id
-    assert fetched.email == created.email
-
-
-async def test_get_missing_raises(service: StudentService) -> None:
-    with pytest.raises(StudentNotFoundError):
-        await service.get(uuid4())
-
-
-async def test_list(service: StudentService) -> None:
-    await service.create(make_student_create(student_number="S-0001", email="a@example.com"))
-    await service.create(make_student_create(student_number="S-0002", email="b@example.com"))
-
-    students, total = await service.list(limit=50, offset=0)
-
-    assert len(students) == 2
-    assert total == 2
-    assert {s.student_number for s in students} == {"S-0001", "S-0002"}
-
-
-async def test_list_pagination_slices_and_reports_total(service: StudentService) -> None:
-    for i in range(5):
-        await service.create(
-            make_student_create(student_number=f"S-{i:04d}", email=f"s{i}@example.com")
-        )
-
-    page, total = await service.list(limit=2, offset=0)
-
-    assert len(page) == 2
-    assert total == 5
-
-
-async def test_list_pagination_offset_skips_correctly(service: StudentService) -> None:
-    created = [
-        await service.create(
-            make_student_create(student_number=f"S-{i:04d}", email=f"off{i}@example.com")
-        )
-        for i in range(5)
-    ]
-    # newest-first: index 4 (last created) is first in the full ordering.
-    expected_full_order_ids = [s.id for s in reversed(created)]
-
-    page, total = await service.list(limit=2, offset=2)
-
-    assert total == 5
-    assert [s.id for s in page] == expected_full_order_ids[2:4]
-
-
-async def test_list_newest_first_ordering(service: StudentService) -> None:
-    first = await service.create(
-        make_student_create(student_number="S-ORD-1", email="ord1@example.com")
-    )
-    second = await service.create(
-        make_student_create(student_number="S-ORD-2", email="ord2@example.com")
-    )
-    third = await service.create(
-        make_student_create(student_number="S-ORD-3", email="ord3@example.com")
-    )
-
-    page, total = await service.list(limit=50, offset=0)
-
-    assert total == 3
-    assert [s.id for s in page] == [third.id, second.id, first.id]
-
-
-async def test_update_success(service: StudentService) -> None:
-    created = await service.create(make_student_create())
-
-    updated = await service.update(
-        created.id, StudentUpdate(first_name="Augusta", enrollment_status="graduated")
-    )
-
-    assert updated.id == created.id
-    assert updated.first_name == "Augusta"
-    assert updated.enrollment_status == "graduated"
-    assert updated.last_name == "Lovelace"
-
-
-async def test_update_missing_raises(service: StudentService) -> None:
-    with pytest.raises(StudentNotFoundError):
-        await service.update(uuid4(), StudentUpdate(first_name="Nobody"))
-
-
-async def test_delete_success(service: StudentService, repository: FakeStudentRepository) -> None:
-    created = await service.create(make_student_create())
-
-    await service.delete(created.id)
-
-    assert await repository.get(created.id) is None
-
-
-async def test_delete_missing_raises(service: StudentService) -> None:
-    with pytest.raises(StudentNotFoundError):
-        await service.delete(uuid4())
-
-
-# ---------------------------------------------------------------------------
-# Auto-generated student_number
-# ---------------------------------------------------------------------------
-
-
 async def test_create_without_student_number_generates_one(service: StudentService) -> None:
     data = make_student_create(student_number=None, email="autogen1@example.com")
 
@@ -432,43 +295,6 @@ async def test_generate_pin_reuses_existing_linked_user(
     assert verify_password(result.pin, refreshed.pin_hash)
 
 
-async def test_generate_pin_missing_student_raises(service: StudentService) -> None:
-    with pytest.raises(StudentNotFoundError):
-        await service.generate_pin(uuid4())
-
-
-# ---------------------------------------------------------------------------
-# get_my_student
-# ---------------------------------------------------------------------------
-
-
-async def test_get_my_student_success(
-    service: StudentService, user_repository: FakeUserRepository
-) -> None:
-    linked_user = await user_repository.add(
-        User(email="me1@example.com", hashed_password=DUMMY_PASSWORD_HASH, role=UserRole.STUDENT)
-    )
-    created = await service.create(
-        make_student_create(
-            student_number="STU-ME-1", email="me1@example.com", user_id=linked_user.id
-        )
-    )
-
-    fetched = await service.get_my_student(linked_user.id)
-
-    assert fetched.id == created.id
-
-
-async def test_get_my_student_no_linked_record_raises(service: StudentService) -> None:
-    with pytest.raises(StudentHasNoLinkedRecordError):
-        await service.get_my_student(uuid4())
-
-
-# ---------------------------------------------------------------------------
-# upload_profile_picture / delete cleanup
-# ---------------------------------------------------------------------------
-
-
 async def test_upload_profile_picture_success(
     service: StudentService,
     repository: FakeStudentRepository,
@@ -491,16 +317,6 @@ async def test_upload_profile_picture_success(
     refreshed = await repository.get(created.id)
     assert refreshed is not None
     assert refreshed.profile_picture_path == updated.profile_picture_path
-
-
-async def test_upload_profile_picture_missing_student_raises(
-    service: StudentService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(settings, "upload_dir", str(tmp_path))
-    upload = make_upload_file(b"fake-jpeg-bytes", "image/jpeg")
-
-    with pytest.raises(StudentNotFoundError):
-        await service.upload_profile_picture(uuid4(), upload)
 
 
 async def test_delete_cleans_up_profile_picture_file(

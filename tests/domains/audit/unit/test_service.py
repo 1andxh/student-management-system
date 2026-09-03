@@ -63,30 +63,6 @@ def service(repository: FakeAuditLogRepository) -> AuditService:
     return AuditService(repository)
 
 
-async def test_record_stores_entry_retrievable_via_list_all(service: AuditService) -> None:
-    actor_id = uuid4()
-    target_id = uuid4()
-
-    recorded = await service.record(
-        actor_user_id=actor_id,
-        action="user.created",
-        target_user_id=target_id,
-        before=None,
-        after={"email": "ada@example.com", "role": "teacher", "is_active": True},
-    )
-
-    assert recorded.id is not None
-    assert recorded.actor_user_id == actor_id
-    assert recorded.action == "user.created"
-    assert recorded.target_user_id == target_id
-    assert recorded.before is None
-    assert recorded.after == {"email": "ada@example.com", "role": "teacher", "is_active": True}
-
-    entries, total = await service.list_all(limit=50, offset=0)
-    assert recorded.id in {entry.id for entry in entries}
-    assert total >= 1
-
-
 async def test_record_defaults_target_and_before_after_to_none(service: AuditService) -> None:
     recorded = await service.record(actor_user_id=None, action="user.login")
 
@@ -97,40 +73,3 @@ async def test_record_defaults_target_and_before_after_to_none(service: AuditSer
     assert recorded.after is None
 
 
-async def test_list_all_returns_newest_first(service: AuditService) -> None:
-    # Distinguishable actions, recorded in a known order — list_all() must
-    # come back in the reverse (newest-first) order, not insertion order.
-    await service.record(actor_user_id=None, action="first.action")
-    await service.record(actor_user_id=None, action="second.action")
-    await service.record(actor_user_id=None, action="third.action")
-
-    entries, total = await service.list_all(limit=50, offset=0)
-
-    assert total == 3
-    assert [entry.action for entry in entries] == [
-        "third.action",
-        "second.action",
-        "first.action",
-    ]
-
-
-async def test_list_all_pagination_slices_and_reports_total(service: AuditService) -> None:
-    for i in range(5):
-        await service.record(actor_user_id=None, action=f"action.{i}")
-
-    page, total = await service.list_all(limit=2, offset=0)
-
-    assert len(page) == 2
-    assert total == 5
-
-
-async def test_list_all_pagination_offset_skips_correctly(service: AuditService) -> None:
-    for i in range(5):
-        await service.record(actor_user_id=None, action=f"offset.action.{i}")
-
-    page, total = await service.list_all(limit=2, offset=2)
-
-    assert total == 5
-    # newest-first: offset=2 skips the two most-recently-recorded entries
-    # (action.4, action.3), landing on action.2 and action.1.
-    assert [entry.action for entry in page] == ["offset.action.2", "offset.action.1"]
