@@ -5,6 +5,7 @@ Mutations are admin-only. Depends on auth for RBAC (see docs/adr/0006)."""
 
 from sms.domains.classes.exceptions import (
     ClassNotFoundError,
+    ClassAttachedToSectionError,
     NotYourClassError,
     SubjectAlreadyExistsError,
     SubjectNotFoundError,
@@ -23,6 +24,7 @@ from sms.domains.classes.service import ClassService, SubjectService
 
 __all__ = [
     "ClassNotFoundError",
+    "ClassAttachedToSectionError",
     "NotYourClassError",
     "SubjectAlreadyExistsError",
     "SubjectNotFoundError",

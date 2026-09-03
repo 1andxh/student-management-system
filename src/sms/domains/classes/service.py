@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sms.domains.academic_years.exceptions import TermNotFoundError
 from sms.domains.academic_years.repository import TermRepository
 from sms.domains.classes.exceptions import (
+    ClassAttachedToSectionError,
     ClassNotFoundError,
     SubjectAlreadyExistsError,
     SubjectNotFoundError,
@@ -146,6 +147,22 @@ class ClassService:
             term_id=updates.get("term_id"),
             teacher_id=updates.get("teacher_id"),
         )
+
+        # A section-taught class is pinned to its section's academic year:
+        # SectionService.attach_class validates that at attach time, but
+        # nothing stopped a later term change from moving the class into a
+        # different year afterwards, silently re-opening the mismatch that
+        # check exists to prevent (a whole section's roster enrolled in a
+        # foreign-year class — see docs/adr/0024). Rejecting the change
+        # outright keeps that guard in the sections domain rather than
+        # importing sections here, which would be a circular import.
+        new_term_id = updates.get("term_id")
+        if (
+            new_term_id is not None
+            and cls.section_id is not None
+            and new_term_id != cls.term_id
+        ):
+            raise ClassAttachedToSectionError()
 
         for field, value in updates.items():
             setattr(cls, field, value)
