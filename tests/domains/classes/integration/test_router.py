@@ -1087,3 +1087,56 @@ async def test_get_gradebook_as_student_role_returns_403_even_for_own_enrolled_c
     response = await client.get(f"/classes/{klass.id}/gradebook", headers=own_student_headers)
 
     assert response.status_code == 403
+
+
+async def test_patch_class_term_id_while_attached_to_section_returns_409(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    # A section-taught class is pinned to its section's academic year.
+    # SectionService.attach_class validates that at attach time; without
+    # this guard a later term change would silently move the class into a
+    # different year, re-opening the mismatch (docs/adr/0024).
+    from sms.domains.academic_years.models import AcademicYear
+    from sms.domains.sections.models import GradeLevel, Section
+
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    klass = await make_class(subject.id, term.id, teacher.id)
+
+    grade_level = GradeLevel(name=f"Grade {uuid4().hex[:6]}", rank=7)
+    year = AcademicYear(
+        name=f"Year {uuid4().hex[:8]}", start_date=date(2024, 9, 1), end_date=date(2025, 6, 30)
+    )
+    db_session.add_all([grade_level, year])
+    await db_session.commit()
+    section = Section(
+        grade_level_id=grade_level.id,
+        academic_year_id=year.id,
+        name="A",
+        capacity=30,
+    )
+    db_session.add(section)
+    await db_session.commit()
+    klass.section_id = section.id
+    db_session.add(klass)
+    await db_session.commit()
+
+    # Same academic year, different term — make_academic_year uses a fixed
+    # name, so a second call would collide on uq_academic_years_name. The
+    # guard rejects any term change while attached, so this still exercises
+    # it (and proves the rejection isn't merely a year comparison).
+    other_term = await make_term(academic_year_id=term.academic_year_id, name="Term 2")
+    headers = await make_manage_headers(email="admin-pinned-term@example.com")
+
+    response = await client.patch(
+        f"/classes/{klass.id}", json={"term_id": str(other_term.id)}, headers=headers
+    )
+
+    assert response.status_code == 409
