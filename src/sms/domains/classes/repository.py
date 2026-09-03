@@ -50,10 +50,17 @@ class ClassRepository(AbstractRepository[Class]):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def add(self, entity: Class) -> Class:
+    async def add(self, entity: Class, *, commit: bool = True) -> Class:
         self._session.add(entity)
         try:
-            await self._session.commit()
+            if commit:
+                await self._session.commit()
+            else:
+                # Flush, not commit — used when this write must land
+                # atomically alongside others on the same session, e.g.
+                # SectionService.attach_class setting section_id and
+                # back-filling Enrollment rows in one transaction.
+                await self._session.flush()
         except Exception:
             await self._session.rollback()
             raise
@@ -89,13 +96,24 @@ class ClassRepository(AbstractRepository[Class]):
         result = await self._session.execute(select(Class).where(Class.teacher_id == teacher_id))
         return list(result.scalars().all())
 
+    async def list_by_section_id(self, section_id: UUID) -> list[Class]:
+        result = await self._session.execute(select(Class).where(Class.section_id == section_id))
+        return list(result.scalars().all())
+
     async def get_for_update(self, entity_id: UUID) -> Class | None:
         # Row lock held until the caller's own commit — the capacity-race
         # guard in EnrollmentService.enroll() depends on nothing else
         # committing on this session between this read and that commit,
         # same invariant as UserRepository.count_active_super_admins()
         # (docs/adr/0011). See docs/adr/0017.
+        # populate_existing: the lock is always taken, but a Class already in
+        # the session's identity map would otherwise be returned unrefreshed,
+        # so the capacity read could predate the lock. Same hardening applied
+        # to SectionRepository.get_for_update.
         result = await self._session.execute(
-            select(Class).where(Class.id == entity_id).with_for_update()
+            select(Class)
+            .where(Class.id == entity_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()

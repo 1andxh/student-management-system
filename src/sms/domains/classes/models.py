@@ -45,6 +45,20 @@ class Class(Base):
     teacher_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("teachers.id", ondelete="RESTRICT"), nullable=False
     )
+    # Null = an individually-enrolled class (the original behavior). Set =
+    # taught to a whole section, so assigning a student to that section
+    # auto-creates their Enrollment row here.
+    #
+    # Deliberately absent from ClassCreate/ClassUpdate: attaching a class
+    # to a section must back-fill Enrollment rows for the section's current
+    # members, which would make classes/service.py import the enrollments
+    # domain while enrollments/service.py already imports classes — a real
+    # circular-import risk given both packages' __init__.py re-export their
+    # services. The sections domain owns attachment instead, so there is
+    # exactly one path that can set this.
+    section_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("sections.id", ondelete="RESTRICT"), nullable=True
+    )
     capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     room: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

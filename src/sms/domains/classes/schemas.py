@@ -50,5 +50,8 @@ class ClassRead(ClassBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    # Read-only here by design — set only via the sections domain's
+    # attach/detach routes, which also back-fill the section's roster.
+    section_id: UUID | None
     created_at: datetime
     updated_at: datetime

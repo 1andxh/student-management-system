@@ -19,10 +19,17 @@ class EnrollmentRepository(AbstractRepository[Enrollment]):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def add(self, entity: Enrollment) -> Enrollment:
+    async def add(self, entity: Enrollment, *, commit: bool = True) -> Enrollment:
         self._session.add(entity)
         try:
-            await self._session.commit()
+            if commit:
+                await self._session.commit()
+            else:
+                # Flush, not commit — used when this write must land
+                # atomically alongside others on the same session, e.g.
+                # SectionAssignmentService.assign fanning out one
+                # Enrollment per class in the section.
+                await self._session.flush()
         except Exception:
             await self._session.rollback()
             raise
