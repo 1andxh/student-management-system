@@ -199,7 +199,12 @@ class SectionService:
         await self._repository.remove(section)
 
     async def _get_class(self, class_id: UUID) -> Class:
-        cls = await self._classes.get(class_id)
+        # Locking read: attach_class writes section_id, and
+        # ScheduleSlotService.create reads it to decide whether two classes
+        # share a section in one slot. Locking the Class row in both paths
+        # is what makes them serialise (security-auditor finding on the
+        # timetable stage).
+        cls = await self._classes.get_for_update(class_id)
         if cls is None:
             raise ClassNotFoundError()
         return cls

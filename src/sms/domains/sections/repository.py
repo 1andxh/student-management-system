@@ -191,6 +191,24 @@ class SectionAssignmentRepository(AbstractRepository[SectionAssignment]):
         )
         return result.scalar_one_or_none()
 
+    async def get_latest_by_student_id(self, student_id: UUID) -> SectionAssignment | None:
+        """This student's most recent section assignment.
+
+        "Most recent" stands in for "current" because the system has no
+        notion of an active academic year — nothing marks one AcademicYear
+        as the one in progress. Fine while assignments are created in
+        chronological order, which a promotion/rollover stage would make
+        explicit; worth revisiting then rather than inferring a current
+        year from dates here.
+        """
+        result = await self._session.execute(
+            select(SectionAssignment)
+            .where(SectionAssignment.student_id == student_id)
+            .order_by(SectionAssignment.assigned_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def list_by_section_id(self, section_id: UUID) -> list[SectionAssignment]:
         result = await self._session.execute(
             select(SectionAssignment)
