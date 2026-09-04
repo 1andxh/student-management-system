@@ -234,6 +234,12 @@ class FakeClassRepository(AbstractRepository[Class]):
     async def get(self, entity_id: UUID) -> Class | None:
         return self._classes.get(entity_id)
 
+    async def get_for_update(self, entity_id: UUID) -> Class | None:
+        # No locking to model in-memory — mirrors the real
+        # repository's interface, which both attach_class and
+        # ScheduleSlotService.create go through for their row lock.
+        return self._classes.get(entity_id)
+
     async def list(self) -> list[Class]:
         return list(self._classes.values())
 
