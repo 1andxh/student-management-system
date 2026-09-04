@@ -1,5 +1,10 @@
 # Frontend handoff — backend Stages 10–12
 
+**Base URL: `http://127.0.0.1:8001`** — the API moved off 8000, which was
+already taken on this machine. Use `127.0.0.1`, not `localhost`: they resolve
+differently here (IPv4 vs IPv6) and `localhost` intermittently fails. CORS is
+configured for the Vite dev server at `http://127.0.0.1:5173`.
+
 Covers everything added since the student PIN login work. Three of these are **breaking changes** to endpoints you may already be calling — those are first.
 
 Full design rationale lives in `docs/adr/0022`–`0026`; this document is only what you need to integrate.
@@ -130,7 +135,7 @@ Other rules worth knowing before you build the admin screens:
 - Section capacity is enforced on assignment → 409 when full.
 - Detaching a class or unassigning a student **leaves existing enrollments intact** — that's academic-record data, removed explicitly through the enrollments API if you actually want it gone.
 
-`ClassRead` gained `section_id` (read-only — set only through the attach/detach routes above, not through `ClassCreate`/`ClassUpdate`).
+`ClassRead` gained `section_id` (read-only — set only through the attach/detach routes above, not through `ClassCreate`/`ClassUpdate`), and `GET /classes` gained a matching `section_id` filter, so `GET /classes?section_id=…` gives you a section's classes directly.
 
 ---
 

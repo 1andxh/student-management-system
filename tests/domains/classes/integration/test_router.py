@@ -1140,3 +1140,49 @@ async def test_patch_class_term_id_while_attached_to_section_returns_409(
     )
 
     assert response.status_code == 409
+
+
+async def test_get_classes_list_filtered_by_section_id(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    make_subject: Callable[..., Awaitable[Subject]],
+    make_term: Callable[..., Awaitable[Term]],
+    make_teacher: Callable[..., Awaitable[Teacher]],
+    make_class: Callable[..., Awaitable[Class]],
+    make_manage_headers: Callable[..., Awaitable[dict[str, str]]],
+) -> None:
+    # ClassRead exposes section_id, so being unable to query by it left the
+    # frontend fetching every class and filtering client-side. Mirrors an
+    # existing FK, which is docs/adr/0020's criterion for a warranted filter.
+    from sms.domains.academic_years.models import AcademicYear
+    from sms.domains.sections.models import GradeLevel, Section
+
+    subject = await make_subject()
+    term = await make_term()
+    teacher = await make_teacher()
+    in_section = await make_class(subject.id, term.id, teacher.id)
+    await make_class(subject.id, term.id, teacher.id)  # unattached
+
+    grade_level = GradeLevel(name=f"Grade {uuid4().hex[:6]}", rank=9)
+    year = AcademicYear(
+        name=f"Year {uuid4().hex[:8]}", start_date=date(2024, 9, 1), end_date=date(2025, 6, 30)
+    )
+    db_session.add_all([grade_level, year])
+    await db_session.commit()
+    section = Section(
+        grade_level_id=grade_level.id, academic_year_id=year.id, name="A", capacity=30
+    )
+    db_session.add(section)
+    await db_session.commit()
+    in_section.section_id = section.id
+    db_session.add(in_section)
+    await db_session.commit()
+
+    headers = await make_manage_headers(email="admin-sectionfilter@example.com")
+
+    response = await client.get(
+        "/classes", params={"section_id": str(section.id)}, headers=headers
+    )
+
+    assert response.status_code == 200
+    assert [c["id"] for c in response.json()] == [str(in_section.id)]
