@@ -11,7 +11,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://sms:sms@db:5432/sms
       DATABASE_URL_TEST: postgresql+asyncpg://sms:sms@db-test:5432/sms_test
     ports:
-      - "8000:8000"
+      # Host 8001, container 8000. 8000 is taken by an unrelated project on
+      # this machine, which made `docker compose up` fail outright with a
+      # port-allocation error. Only the host side moved — nothing inside the
+      # container or in app config knows or cares.
+      - "8001:8000"
     volumes:
       # Only this directory is bind-mounted: alembic revision --autogenerate
       # writes migration files inside the container, and without this they'd
