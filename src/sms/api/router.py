@@ -8,6 +8,7 @@ from sms.domains.classes.router import classes_router, subjects_router
 from sms.domains.enrollments.router import router as enrollments_router
 from sms.domains.sections.router import grade_levels_router, sections_router
 from sms.domains.students.router import router as students_router
+from sms.domains.timetable.router import periods_router, timetable_router
 from sms.domains.teachers.router import router as teachers_router
 from sms.domains.users.router import router as users_router
 
@@ -33,5 +34,7 @@ api_router.include_router(sections_router)
 api_router.include_router(subjects_router)
 api_router.include_router(classes_router)
 api_router.include_router(enrollments_router)
+api_router.include_router(periods_router)
+api_router.include_router(timetable_router)
 api_router.include_router(assessments_router)
 api_router.include_router(grades_router)

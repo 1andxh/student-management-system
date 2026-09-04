@@ -30,6 +30,7 @@ from sms.domains.enrollments import models as enrollments_models  # noqa: F401
 from sms.domains.sections import models as sections_models  # noqa: F401
 from sms.domains.students import models as students_models  # noqa: F401
 from sms.domains.teachers import models as teachers_models  # noqa: F401
+from sms.domains.timetable import models as timetable_models  # noqa: F401
 from sms.domains.users import models as users_models  # noqa: F401
 
 target_metadata = Base.metadata
