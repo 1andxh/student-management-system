@@ -129,6 +129,7 @@ class ClassService:
         term_id: UUID | None = None,
         subject_id: UUID | None = None,
         teacher_id: UUID | None = None,
+        section_id: UUID | None = None,
     ) -> tuple[list[Class], int]:
         return await self._repository.list(
             limit=limit,
@@ -136,6 +137,7 @@ class ClassService:
             term_id=term_id,
             subject_id=subject_id,
             teacher_id=teacher_id,
+            section_id=section_id,
         )
 
     async def update(self, class_id: UUID, data: ClassUpdate) -> Class:

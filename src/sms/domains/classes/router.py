@@ -133,6 +133,7 @@ async def list_classes(
     term_id: UUID | None = None,
     subject_id: UUID | None = None,
     teacher_id: UUID | None = None,
+    section_id: UUID | None = None,
     pagination: Pagination = Depends(pagination_params),
     service: ClassService = Depends(get_class_service),
 ) -> list[Class]:
@@ -142,6 +143,7 @@ async def list_classes(
         term_id=term_id,
         subject_id=subject_id,
         teacher_id=teacher_id,
+        section_id=section_id,
     )
     response.headers["X-Total-Count"] = str(total)
     return items

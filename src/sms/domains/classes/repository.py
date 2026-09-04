@@ -78,8 +78,11 @@ class ClassRepository(AbstractRepository[Class]):
         term_id: UUID | None = None,
         subject_id: UUID | None = None,
         teacher_id: UUID | None = None,
+        section_id: UUID | None = None,
     ) -> tuple[list[Class], int]:
         query = select(Class).order_by(Class.created_at.desc())
+        if section_id is not None:
+            query = query.where(Class.section_id == section_id)
         if term_id is not None:
             query = query.where(Class.term_id == term_id)
         if subject_id is not None:
