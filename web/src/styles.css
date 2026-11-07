@@ -38,6 +38,9 @@
   --canvas: light-dark(#f2f4f3, #111615);
   --surface: light-dark(#ffffff, #181e1d);
   --field: light-dark(#ffffff, #1d2423);
+  /* Menus, popovers, dialogs. In dark mode "higher" must also mean
+     "lighter", or an overlay is the same color as the card beneath it. */
+  --overlay: light-dark(#ffffff, #212a28);
   --inset: light-dark(#f0f2f1, #141a19);
   /* Recessed tracks (switches, sliders): a step below the canvas, so a
      control's groove reads as cut into the page. Text on it uses ink-2,
@@ -48,6 +51,13 @@
      boundaries (inputs need 3:1 against their background). */
   --line: light-dark(#dde1de, #2b3432);
   --line-strong: light-dark(#7d8784, #6e7a77);
+  /* Field edges, at rest and hovered. Deliberately BELOW WCAG 1.4.11's 3:1
+     for a control boundary (1.78:1 light, 2.0:1 dark) — an accepted,
+     recorded exception (ADR 0029): Solomon preferred the softer edge, and
+     fields are identified by their visible labels and position. Focus and
+     invalid states still use full-contrast edges. */
+  --line-field: light-dark(#bec3c2, #464f4d);
+  --line-field-hover: light-dark(#a2aaa7, #57625f);
 
   /* Ink: primary, secondary, muted. Never pure black or white. */
   --ink: light-dark(#1f2a2e, #e4eae8);
@@ -65,6 +75,8 @@
      conflicts, errors, destructive actions. Never decoration. */
   --red-pen: light-dark(#b3261e, #f08a80);
   --red-pen-tint: light-dark(#fbebe9, #3a1e1b);
+  --red-pen-hover: light-dark(#9c2019, #f5a39b);
+  --on-red-pen: light-dark(#ffffff, #1a0b09);
 
   --warn: light-dark(#8a5300, #e8b061);
   --warn-tint: light-dark(#fbf0df, #36291a);
@@ -72,6 +84,10 @@
   --ok-tint: light-dark(#e5efe9, #1c3127);
 
   --hover: light-dark(rgb(31 42 46 / 0.04), rgb(228 234 232 / 0.05));
+  /* Table row hover, opaque on purpose: the pinned first column needs a solid
+     background to hide what scrolls under it, and a translucent hover would
+     leave that one cell un-highlighted. Same tone as --hover over surface. */
+  --row-hover: light-dark(#f6f7f7, #222827);
   --scrim: light-dark(rgb(17 22 21 / 0.4), rgb(0 0 0 / 0.55));
 
   /* Elevation: depth from light, not from borders. Each level layers a lit
@@ -96,13 +112,14 @@
   --shadow-overlay-value: inset 0 1px 0 var(--edge-lit), 0 0 0 1px var(--edge-ring),
     0 4px 8px var(--shade-1), 0 24px 48px -12px var(--shade-4);
 
-  /* Primary button: a lit top edge plus a contact shadow in its own hue, so
-     it sits on the page instead of being printed on it. */
-  --button-lit: light-dark(rgb(255 255 255 / 0.16), rgb(255 255 255 / 0.35));
+  /* Primary button: an edge and a soft contact shadow in its own hue, so it
+     sits on the page instead of being printed on it. (No inset top
+     highlight: on a solid green fill it read as a white reflection along
+     the edge — removed at Solomon's review.) */
   --button-ring: light-dark(rgb(31 74 54 / 0.9), rgb(124 195 160 / 0.6));
   --button-glow: light-dark(rgb(31 74 54 / 0.35), rgb(124 195 160 / 0.3));
-  --shadow-button-value: inset 0 1px 0 var(--button-lit), 0 0 0 1px var(--button-ring),
-    0 1px 2px var(--shade-1), 0 4px 12px -4px var(--button-glow);
+  --shadow-button-value: 0 0 0 1px var(--button-ring), 0 1px 2px var(--shade-1),
+    0 4px 12px -4px var(--button-glow);
 }
 
 @theme inline {
@@ -117,6 +134,7 @@
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
   --color-field: var(--field);
+  --color-overlay: var(--overlay);
   --color-inset: var(--inset);
   --color-well: var(--well);
   --color-line: var(--line);
@@ -131,11 +149,14 @@
   --color-accent-tint: var(--accent-tint);
   --color-red-pen: var(--red-pen);
   --color-red-pen-tint: var(--red-pen-tint);
+  --color-red-pen-hover: var(--red-pen-hover);
+  --color-on-red-pen: var(--on-red-pen);
   --color-warn: var(--warn);
   --color-warn-tint: var(--warn-tint);
   --color-ok: var(--ok);
   --color-ok-tint: var(--ok-tint);
   --color-hover: var(--hover);
+  --color-row-hover: var(--row-hover);
   --color-scrim: var(--scrim);
   --color-transparent: transparent;
   --color-current: currentColor;
@@ -153,25 +174,34 @@
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
 
   /* Dense scale, named by job rather than size. Body is 14px: this is a
-     records tool used for hours, not a page read once. */
-  --text-caption: 12px;
-  --text-caption--line-height: 16px;
-  --text-small: 13px;
-  --text-small--line-height: 18px;
-  --text-body: 14px;
-  --text-body--line-height: 20px;
-  --text-lead: 16px;
-  --text-lead--line-height: 24px;
-  --text-title: 20px;
-  --text-title--line-height: 28px;
+     records tool used for hours, not a page read once.
+
+     In rem, against the browser's default root size — never a px size on
+     <html>. An earlier version set html { font-size: 14px }, and since
+     Tailwind's whole spacing scale is rem too, every height, padding and
+     gap silently shrank to 87.5% (a "40px" control was 35px, the "44px"
+     touch target 38.5px), and the user's own browser text-size setting was
+     overridden. Values below assume the default 16px root: 0.875rem = 14px. */
+  --text-caption: 0.75rem;
+  --text-caption--line-height: 1rem;
+  --text-small: 0.8125rem;
+  --text-small--line-height: 1.125rem;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.25rem;
+  --text-lead: 1rem;
+  --text-lead--line-height: 1.5rem;
+  --text-title: 1.25rem;
+  --text-title--line-height: 1.75rem;
   --text-title--letter-spacing: -0.012em;
-  --text-display: 30px;
-  --text-display--line-height: 36px;
+  --text-display: 1.875rem;
+  --text-display--line-height: 2.25rem;
   --text-display--letter-spacing: -0.022em;
 
-  /* Soft, not pill-shaped: controls 8px, cards 12px, nested 6px. */
+  /* Soft, not pill-shaped: controls (fields, buttons) 10px, cards 12px,
+     small/nested things 6–8px. */
   --radius-sm: 6px;
   --radius-md: 8px;
+  --radius-control: 10px;
   --radius-lg: 12px;
   --radius-full: 9999px;
 
@@ -179,6 +209,38 @@
      things that open (menus, dialogs) or slide (the switch indicator). */
   --ease-soft: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-snap: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Popover/menu/dialog enter and exit. React Aria sets data-entering /
+     data-exiting and waits for the exit animation to finish before
+     unmounting, so these only need to exist as CSS. Opacity + scale only;
+     exits are faster than entrances (you're done with it). */
+  --animate-pop-in: pop-in 180ms var(--ease-snap);
+  --animate-pop-out: pop-out 120ms ease-in forwards;
+  --animate-fade-in: fade-in 180ms var(--ease-soft);
+  --animate-fade-out: fade-out 120ms ease-in forwards;
+
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.96) translateY(-2px);
+    }
+  }
+  @keyframes pop-out {
+    to {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes fade-out {
+    to {
+      opacity: 0;
+    }
+  }
 }
 
 @layer base {
@@ -186,8 +248,8 @@
     background: var(--canvas);
     color: var(--ink);
     font-family: var(--font-sans);
-    font-size: 14px;
-    line-height: 20px;
+    /* No font-size here: the root stays at the browser default (see the
+       type scale note). Body text size is set on body instead. */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
@@ -196,6 +258,8 @@
   body {
     margin: 0;
     min-height: 100dvh;
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
   }
 
   /* Every number in this app is a score, an ID, a time or a count —
