@@ -19,6 +19,8 @@ The frontend this replaces looked generic. Three directions were offered, each d
   - In dark mode, where shadows barely register, a lit inset top edge does most of the work.
   - The canvas sits a step below white (`#F2F4F3`) so cards lift off it.
   - Recessed tracks such as switches use a darker `--well`.
+  - Menus, popovers and dialogs use their own `--overlay` surface. In dark mode "higher" must also mean "lighter", or an overlay is the same color as the card under it.
+  - The primary button has an edge and a soft shadow in its own hue, but **no inset top highlight**. On a solid green fill it read as a white reflection along the edge, and it was removed at review.
 - **No decorative gradients.** "Not flat" was solved with elevation and light, not gradients; the reference guide rejects decorative gradients, and so does this design.
 - **Type:**
   - **Public Sans** (made for the U.S. Web Design System) for the interface. **IBM Plex Mono** for every score, ID, time and count, with `tabular-nums` so columns line up.
@@ -33,7 +35,20 @@ The frontend this replaces looked generic. Three directions were offered, each d
   - Moving selection uses a single sliding indicator, not each item toggling its own background.
   - `prefers-reduced-motion` turns non-essential motion off globally.
 - **State is never carried by color alone.** Notices pair their tint with a status icon, an ungraded cell is a dash with "Not graded" for screen readers, and the selected switch option is raised and bolder as well as colored.
-- **Controls are 36px tall, and 44px on touch screens** (`pointer-coarse`).
+- **Fields have a soft edge at rest: a recorded accessibility exception.**
+  - Three styles were compared at review: recessed (1.6:1 boundary), raised (1.9:1) and "Defined" (full-contrast `line-strong`, 3.7:1). Solomon first chose Defined.
+  - After seeing it rendered, he asked for every field to look like the disabled Email sample: a soft edge, which was really `line-strong` faded to 50%. That is `--line-field`: `#BEC3C2` (1.78:1) light, `#464F4D` (2.0:1) dark.
+  - This is **below WCAG 1.4.11's 3:1 for a control boundary**, and the shortfall was stated before the choice was made. The lightest compliant edge (`#8E9794`, 3.0:1) looks almost the same as Defined, so no compliant version gives this look.
+  - **The exception's justification:** every field has a visible label directly above it, fields sit in consistent positions, and the states that matter switch to full-contrast edges (focus: accent; invalid: red pen). Text inside fields keeps full AA contrast; only the resting edge is soft.
+  - **Disabled can't fade any more**, or it would look like an enabled field. It becomes a grey filled well (`inset`) with muted text and no edge.
+- **The 1.5px edge is a 1px border plus a 0.5px inset box-shadow ring, not `border-width: 1.5px`.** Chrome rounds border widths down to whole CSS pixels, so a 1.5px border renders as 1px, even on 2x screens; box-shadow isn't rounded.
+  - The first rendering of option C used `border-[1.5px]` and showed a 1px line. Measuring caught it.
+  - Both parts read one variable, `--edge`, so hover, focus and invalid states recolor the whole edge together.
+- **Fields and regular buttons are both 40px tall with the same 10px `control` radius,** so a button lines up with the input beside it. Small buttons are 28px. Everything is 44px on touch screens (`pointer-coarse`). All of this was measured in a browser, with touch emulated for the 44px case.
+- **The type scale is in `rem`, and `<html>` keeps the browser's default font size.**
+  - An earlier version set `html { font-size: 14px }`. Tailwind's whole spacing scale is rem-based, so every height, padding and gap silently rendered at 87.5% of its intended size: a "40px" control was 35px, and the "44px" touch target was 38.5px.
+  - A px root size also overrides the user's own browser text-size setting.
+  - Body text is still 14px (`0.875rem`, set on `body`), and it now scales with the user's setting.
 
 ### Contrast (WCAG AA, computed, not eyeballed)
 Every text/background pair the components use passes 4.5:1, and every control boundary passes 3:1, in both themes. Representative pairs (light / dark):
@@ -48,16 +63,21 @@ Every text/background pair the components use passes 4.5:1, and every control bo
 | ink-2 on red-pen-tint (notice body) | 7.70 | 8.69 |
 | line-strong on field (input border, 3:1) | 3.70 | 3.55 |
 | accent on surface (focus ring, 3:1) | 6.29 | 8.19 |
+| on-red-pen on red-pen (danger button) | 6.54 | 7.90 |
+| accent-ink on accent-tint (highlighted menu option) | 6.30 | 7.85 |
+| ink on overlay (menus, dialogs) | 14.70 | 12.08 |
+| line-field on field (field edge at rest): **exception, below 3:1** | 1.78 | 2.00 |
 
 Two values from the originally previewed palette failed and were changed:
 - Muted text `#6B777A` measured 4.11 on inset panels, so it became `#5F6B6E`.
 - The hairline `#DDE1DE` measured 1.32 as an input border, so inputs got a separate `--line-strong`.
 
-`ink-3` on `--well` measures 4.41, so text on wells uses `ink-2`.
+`ink-3` on `--well` measures 4.41, so text on wells uses `ink-2`. The field-edge exception above is the only pair in the system deliberately below its threshold.
 
 ## Consequences
 - **Any token change means re-running the contrast check** for the pairs it touches. The pair table above is the minimum set.
 - **Components never use `dark:` variants or raw hex.** They use role utilities (`bg-surface`, `text-ink-3`, `shadow-card`), and theme switching is entirely the stylesheet's job.
 - **A new color role is added in three places:** its `light-dark()` value, its `@theme` mapping, and the styleguide swatch list.
 - **`/styleguide` is the living reference.** F2b adds the real components to it. It should become dev-only (or admin-only) once the app has real routes (F3).
+- **Never size the root in px, and never trust a border width above 1px to render fractionally.** Both mistakes were invisible in code and only showed up when rendered output was measured. Measure computed sizes in a real browser before claiming one.
 - **Older browsers degrade.** Ones without `light-dark()` lose theme colors. That's accepted for a school-managed modern-browser audience, and not polyfilled.
