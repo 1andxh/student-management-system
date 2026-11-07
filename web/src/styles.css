@@ -1,0 +1,234 @@
+@import "tailwindcss";
+@import "@fontsource-variable/public-sans/wght.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+/* ------------------------------------------------------------------------
+   "Report card" design tokens (docs/adr/0029).
+
+   Two layers:
+   1. Role values as CSS variables on :root. Each is declared ONCE, with
+      both themes side by side: light-dark(<light>, <dark>). Which one
+      applies is decided by `color-scheme` alone — the OS preference by
+      default, or the explicit data-theme switch below. (An earlier version
+      repeated the whole dark block for the OS and the switch cases, and the
+      two copies drifted apart within a day. One declaration can't drift.)
+   2. Tailwind's @theme maps utility names onto those roles (bg-surface,
+      text-ink-3, shadow-card, ...). `inline` makes each utility reference
+      the variable itself, so components never contain `dark:` variants.
+
+   Every text/background pair a component uses is contrast-checked to WCAG
+   AA (4.5:1 text, 3:1 UI boundaries) in both themes; ADR 0029 has the table.
+   Change a value here → re-run that check.
+   ------------------------------------------------------------------------ */
+
+:root {
+  color-scheme: light dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root {
+  /* Surfaces: page, card, input, nested panel. The canvas sits a step
+     below white so cards lift off it. */
+  --canvas: light-dark(#f2f4f3, #111615);
+  --surface: light-dark(#ffffff, #181e1d);
+  --field: light-dark(#ffffff, #1d2423);
+  --inset: light-dark(#f0f2f1, #141a19);
+  /* Recessed tracks (switches, sliders): a step below the canvas, so a
+     control's groove reads as cut into the page. Text on it uses ink-2,
+     not ink-3 (ink-3 drops to 4.41:1 here). */
+  --well: light-dark(#e3e7e5, #0b0f0e);
+
+  /* Lines: hairline for dividers inside cards; strong for control
+     boundaries (inputs need 3:1 against their background). */
+  --line: light-dark(#dde1de, #2b3432);
+  --line-strong: light-dark(#7d8784, #6e7a77);
+
+  /* Ink: primary, secondary, muted. Never pure black or white. */
+  --ink: light-dark(#1f2a2e, #e4eae8);
+  --ink-2: light-dark(#3f4c4f, #bcc6c3);
+  --ink-3: light-dark(#5f6b6e, #97a3a0);
+
+  /* Chalkboard green: one primary action per view, links, focus, selection. */
+  --accent: light-dark(#2f6b4f, #7cc3a0);
+  --accent-hover: light-dark(#285e45, #95d6b5);
+  --accent-ink: light-dark(#28603f, #8fd1b0);
+  --on-accent: light-dark(#ffffff, #0d1a14);
+  --accent-tint: light-dark(#e5efe9, #1c3127);
+
+  /* Red pen: ONLY for things that need attention — ungraded cells,
+     conflicts, errors, destructive actions. Never decoration. */
+  --red-pen: light-dark(#b3261e, #f08a80);
+  --red-pen-tint: light-dark(#fbebe9, #3a1e1b);
+
+  --warn: light-dark(#8a5300, #e8b061);
+  --warn-tint: light-dark(#fbf0df, #36291a);
+  --ok: light-dark(#2f6b4f, #7cc3a0);
+  --ok-tint: light-dark(#e5efe9, #1c3127);
+
+  --hover: light-dark(rgb(31 42 46 / 0.04), rgb(228 234 232 / 0.05));
+  --scrim: light-dark(rgb(17 22 21 / 0.4), rgb(0 0 0 / 0.55));
+
+  /* Elevation: depth from light, not from borders. Each level layers a lit
+     top edge (dark theme only — shadows barely register on a dark canvas,
+     so a highlight does the work there), a faint 1px ring for a crisp edge,
+     a tight contact shadow and a wide soft ambient one. A single shadow
+     reads as either muddy or harsh. Cards get a shadow INSTEAD of a
+     border, never both. */
+  --edge-lit: light-dark(transparent, rgb(255 255 255 / 0.05));
+  --edge-ring: light-dark(rgb(31 42 46 / 0.06), rgb(255 255 255 / 0.07));
+  --shade-1: light-dark(rgb(31 42 46 / 0.05), rgb(0 0 0 / 0.4));
+  --shade-2: light-dark(rgb(31 42 46 / 0.1), rgb(0 0 0 / 0.55));
+  --shade-3: light-dark(rgb(31 42 46 / 0.18), rgb(0 0 0 / 0.65));
+  --shade-4: light-dark(rgb(31 42 46 / 0.24), rgb(0 0 0 / 0.75));
+
+  --shadow-control-value: inset 0 1px 0 var(--edge-lit), 0 0 0 1px var(--edge-ring),
+    0 1px 2px var(--shade-1);
+  --shadow-card-value: inset 0 1px 0 var(--edge-lit), 0 0 0 1px var(--edge-ring),
+    0 1px 2px var(--shade-1), 0 4px 16px -6px var(--shade-2);
+  --shadow-raised-value: inset 0 1px 0 var(--edge-lit), 0 0 0 1px var(--edge-ring),
+    0 2px 4px var(--shade-1), 0 12px 28px -10px var(--shade-3);
+  --shadow-overlay-value: inset 0 1px 0 var(--edge-lit), 0 0 0 1px var(--edge-ring),
+    0 4px 8px var(--shade-1), 0 24px 48px -12px var(--shade-4);
+
+  /* Primary button: a lit top edge plus a contact shadow in its own hue, so
+     it sits on the page instead of being printed on it. */
+  --button-lit: light-dark(rgb(255 255 255 / 0.16), rgb(255 255 255 / 0.35));
+  --button-ring: light-dark(rgb(31 74 54 / 0.9), rgb(124 195 160 / 0.6));
+  --button-glow: light-dark(rgb(31 74 54 / 0.35), rgb(124 195 160 / 0.3));
+  --shadow-button-value: inset 0 1px 0 var(--button-lit), 0 0 0 1px var(--button-ring),
+    0 1px 2px var(--shade-1), 0 4px 12px -4px var(--button-glow);
+}
+
+@theme inline {
+  /* Drop Tailwind's defaults for every scale designed here: bg-blue-500,
+     text-lg, shadow-md and rounded-2xl simply don't exist, so the only
+     values anyone can reach for are these. */
+  --color-*: initial;
+  --text-*: initial;
+  --shadow-*: initial;
+  --radius-*: initial;
+
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-field: var(--field);
+  --color-inset: var(--inset);
+  --color-well: var(--well);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-on-accent: var(--on-accent);
+  --color-accent-tint: var(--accent-tint);
+  --color-red-pen: var(--red-pen);
+  --color-red-pen-tint: var(--red-pen-tint);
+  --color-warn: var(--warn);
+  --color-warn-tint: var(--warn-tint);
+  --color-ok: var(--ok);
+  --color-ok-tint: var(--ok-tint);
+  --color-hover: var(--hover);
+  --color-scrim: var(--scrim);
+  --color-transparent: transparent;
+  --color-current: currentColor;
+
+  --shadow-control: var(--shadow-control-value);
+  --shadow-card: var(--shadow-card-value);
+  --shadow-raised: var(--shadow-raised-value);
+  --shadow-overlay: var(--shadow-overlay-value);
+  --shadow-button: var(--shadow-button-value);
+
+  /* Public Sans: made for the U.S. Web Design System (derived from Libre
+     Franklin), i.e. for forms and dense public-service UI — neutral without
+     being the default Inter/Roboto look. Plex Mono: figures that line up. */
+  --font-sans: "Public Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Dense scale, named by job rather than size. Body is 14px: this is a
+     records tool used for hours, not a page read once. */
+  --text-caption: 12px;
+  --text-caption--line-height: 16px;
+  --text-small: 13px;
+  --text-small--line-height: 18px;
+  --text-body: 14px;
+  --text-body--line-height: 20px;
+  --text-lead: 16px;
+  --text-lead--line-height: 24px;
+  --text-title: 20px;
+  --text-title--line-height: 28px;
+  --text-title--letter-spacing: -0.012em;
+  --text-display: 30px;
+  --text-display--line-height: 36px;
+  --text-display--letter-spacing: -0.022em;
+
+  /* Soft, not pill-shaped: controls 8px, cards 12px, nested 6px. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* One house curve for state changes and entrances; a snappier one for
+     things that open (menus, dialogs) or slide (the switch indicator). */
+  --ease-soft: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-snap: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+  }
+
+  /* Every number in this app is a score, an ID, a time or a count —
+     columns of them must line up. */
+  .tabular,
+  td,
+  th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* One focus style everywhere: 2px accent ring, offset so it never hides
+     the control's own edge. :focus-visible only, so mouse clicks don't
+     flash it but keyboard users always see where they are. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--accent-tint);
+    color: var(--ink);
+  }
+}
+
+/* Motion is opt-out at the root: anyone who asked their OS for less gets
+   none of the non-essential movement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
