@@ -7,7 +7,7 @@ from sms.core.repository import AbstractRepository
 from sms.core.security import hash_password, hash_token
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
 from sms.domains.auth.models import Session
-from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenResponse
+from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenPair
 from sms.domains.auth.service import AuthService
 from sms.domains.students.models import EnrollmentStatus, Student
 from sms.domains.users.models import User, UserRole
@@ -185,7 +185,7 @@ async def test_login_success(service: AuthService, repository: FakeUserRepositor
 
     result = await service.login(LoginRequest(email="ada@example.com", password="correct-horse"))
 
-    assert isinstance(result, TokenResponse)
+    assert isinstance(result, TokenPair)
     assert result.token_type == "bearer"
     assert result.access_token
     assert len(result.access_token) > 0
@@ -240,7 +240,7 @@ async def test_refresh_with_valid_token_returns_new_token_response(
 
     refreshed = await service.refresh(login_result.refresh_token)
 
-    assert isinstance(refreshed, TokenResponse)
+    assert isinstance(refreshed, TokenPair)
     assert refreshed.access_token
     assert refreshed.refresh_token
 
@@ -341,7 +341,7 @@ async def test_login_with_pin_success(
         PinLoginRequest(student_number="STU-PIN-1", pin="123456")
     )
 
-    assert isinstance(result, TokenResponse)
+    assert isinstance(result, TokenPair)
     assert result.token_type == "bearer"
     assert result.access_token
     assert result.refresh_token
