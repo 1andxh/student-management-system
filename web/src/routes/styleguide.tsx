@@ -1,6 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useLayoutEffect, useState } from "react";
 
+import type { SortDescriptor } from "react-aria-components";
+
+import { Button } from "../components/ui/button";
+import { ConfirmDialog, Dialog, DialogActions, DialogTrigger } from "../components/ui/dialog";
+import { EmptyState } from "../components/ui/empty-state";
+import { Notice } from "../components/ui/notice";
+import { OneTimeSecretDialog } from "../components/ui/one-time-secret-dialog";
+import { SelectField, SelectItem } from "../components/ui/select-field";
+import { Skeleton } from "../components/ui/skeleton";
+import { Cell, Column, Pagination, Row, Table, TableBody, TableFrame, TableHeader } from "../components/ui/table";
+import { TextField } from "../components/ui/text-field";
+import { toast } from "../components/ui/toast";
+
 export const Route = createFileRoute("/styleguide")({
   component: Styleguide,
 });
@@ -8,10 +21,10 @@ export const Route = createFileRoute("/styleguide")({
 type Theme = "system" | "light" | "dark";
 const THEMES: Theme[] = ["system", "light", "dark"];
 
-// Token preview for Stage F2a: the raw design decisions, rendered, before
-// any component is built on them. Components (F2b) get their own section
-// here once they exist. The controls on this page are hand-rolled
-// placeholders, not the real Button/SegmentedControl.
+// The living reference for the design system (ADR 0029): tokens first,
+// then the real components from src/components/ui, then a composed sample.
+// The theme switch is still a hand-rolled placeholder until a
+// SegmentedControl component exists.
 function Styleguide() {
   const [theme, setTheme] = useState<Theme>("system");
 
@@ -61,9 +74,54 @@ function Styleguide() {
         <TypeScale />
       </Section>
 
+      <Section
+        title="Buttons"
+        note="One primary per view. Press one to see the pending state: it keeps its width, ignores presses and stays focusable."
+      >
+        <ButtonSample />
+      </Section>
+
+      <Section
+        title="Fields"
+        note="Labels are always real labels. Errors sit under the field and are read out with it."
+      >
+        <FieldSample />
+      </Section>
+
+      <Section
+        title="Dialogs"
+        note="General dialogs close by X, Esc or clicking outside. Confirmations and one-time secrets can’t be closed by accident."
+      >
+        <DialogSample />
+      </Section>
+
+      <Section title="Toasts" note="Success and info close after 5 seconds. Errors stay until dismissed.">
+        <ToastSample />
+      </Section>
+
+      <Section
+        title="Table"
+        note="Sortable headers, pinned first column, numbers in mono. Arrow keys move between cells. Try the empty and loading states."
+      >
+        <TableSample />
+      </Section>
+
+      <Section title="Notices" note="Inline messages in the page. The icon shape carries the state, not just the color.">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Notice tone="error" title="Ms. Lovelace already teaches period 3 on Monday">
+            Pick another period, or move her 7B Science class first.
+          </Notice>
+          <Notice tone="success" title="Grace Hopper assigned to 7A">
+            Enrolled in all 6 of 7A’s classes.
+          </Notice>
+          <Notice tone="warning" title="Conflicts are only checked when a slot is created">
+            Changing a class’s teacher or room later can create one silently.
+          </Notice>
+        </div>
+      </Section>
+
       <Section title="In context" note="A gradebook excerpt: the screen this direction is built around.">
         <GradebookSample />
-        <NoticeSample />
       </Section>
     </div>
   );
@@ -252,6 +310,300 @@ function TypeScale() {
   );
 }
 
+/* --------------------------------------------------------------- components */
+
+function useFakeRequest() {
+  const [pending, setPending] = useState<string | null>(null);
+  const run = (key: string) => {
+    setPending(key);
+    window.setTimeout(() => setPending(null), 1500);
+  };
+  return { pending, run };
+}
+
+function ButtonSample() {
+  const { pending, run } = useFakeRequest();
+  return (
+    <div className="space-y-4 rounded-lg bg-surface p-5 shadow-card">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="primary" isPending={pending === "primary"} onPress={() => run("primary")}>
+          Save changes
+        </Button>
+        <Button isPending={pending === "secondary"} onPress={() => run("secondary")}>
+          Export roster
+        </Button>
+        <Button variant="quiet" isPending={pending === "quiet"} onPress={() => run("quiet")}>
+          Cancel
+        </Button>
+        <Button variant="danger" isPending={pending === "danger"} onPress={() => run("danger")}>
+          Remove from section
+        </Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 border-t border-line pt-4">
+        <Button size="sm" variant="primary">
+          Grade
+        </Button>
+        <Button size="sm">Edit</Button>
+        <Button size="sm" variant="quiet">
+          Details
+        </Button>
+        <Button isDisabled>Disabled</Button>
+      </div>
+    </div>
+  );
+}
+
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+
+function FieldSample() {
+  return (
+    <div className="grid gap-x-6 gap-y-5 rounded-lg bg-surface p-5 shadow-card sm:grid-cols-2">
+      <TextField label="Student number" placeholder="STU-0001…" spellCheck="false" autoComplete="off" />
+      <TextField
+        label="Room"
+        description="Free text. “Lab 2” and “lab 2” count as different rooms."
+        defaultValue="Lab 2"
+      />
+      <TextField label="PIN" defaultValue="12a4" isInvalid errorMessage="A PIN is 6 digits. Letters aren’t allowed." />
+      <TextField label="Email" defaultValue="grace.hopper@demo.school" isDisabled />
+      <SelectField label="Day" placeholder="Choose a day…">
+        {DAYS.map((day) => (
+          <SelectItem key={day} id={day.toLowerCase()}>
+            {day}
+          </SelectItem>
+        ))}
+      </SelectField>
+      <SelectField label="Period" placeholder="Choose a period…" isInvalid errorMessage="Ms. Lovelace already teaches period 3 on Monday.">
+        <SelectItem id="p1">Period 1 · 08:00–08:45</SelectItem>
+        <SelectItem id="p2">Period 2 · 08:50–09:35</SelectItem>
+        <SelectItem id="p3">Period 3 · 09:45–10:30</SelectItem>
+      </SelectField>
+    </div>
+  );
+}
+
+function DialogSample() {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [secret, setSecret] = useState<{ title: string; recipient: string; name: string; value: string } | null>(null);
+  const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  return (
+    <div className="flex flex-wrap gap-3 rounded-lg bg-surface p-5 shadow-card">
+      <DialogTrigger>
+        <Button>Edit room</Button>
+        <Dialog title="Edit room for 7A Science" description="Rooms are free text and case-sensitive.">
+          {({ close }) => (
+            <>
+              <TextField label="Room" defaultValue="Lab 2" />
+              <DialogActions>
+                <Button variant="quiet" onPress={close}>
+                  Cancel
+                </Button>
+                <Button variant="primary" onPress={close}>
+                  Save room
+                </Button>
+              </DialogActions>
+            </>
+          )}
+        </Dialog>
+      </DialogTrigger>
+
+      <Button variant="danger" onPress={() => setConfirmOpen(true)}>
+        Remove from section…
+      </Button>
+      <ConfirmDialog
+        isOpen={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Remove Grace Hopper from 7A?"
+        description="Her enrollments in 7A’s classes stay. Remove those separately if she’s leaving them too."
+        confirmLabel="Remove from section"
+        onConfirm={async () => {
+          await wait(1200);
+          toast({ tone: "success", title: "Grace Hopper removed from 7A" });
+        }}
+      />
+
+      <Button
+        onPress={() =>
+          setSecret({ title: "New password for Ada Lovelace", recipient: "Ada Lovelace", name: "password", value: "S_7lD50GYvsGVY0m3wErQw" })
+        }
+      >
+        Issue teacher password
+      </Button>
+      <Button
+        onPress={() => setSecret({ title: "PIN for Grace Hopper", recipient: "Grace Hopper", name: "PIN", value: "482913" })}
+      >
+        Issue student PIN
+      </Button>
+      {secret && (
+        <OneTimeSecretDialog
+          isOpen
+          onClose={() => setSecret(null)}
+          title={secret.title}
+          recipient={secret.recipient}
+          secretName={secret.name}
+          secret={secret.value}
+        />
+      )}
+    </div>
+  );
+}
+
+function ToastSample() {
+  return (
+    <div className="flex flex-wrap gap-3 rounded-lg bg-surface p-5 shadow-card">
+      <Button onPress={() => toast({ tone: "success", title: "Timetable saved", description: "7A’s Monday now has 6 periods." })}>
+        Success
+      </Button>
+      <Button
+        onPress={() =>
+          toast({ tone: "error", title: "Couldn’t save the timetable", description: "The connection dropped. Your changes are still here; try again." })
+        }
+      >
+        Error
+      </Button>
+      <Button onPress={() => toast({ tone: "info", title: "Showing Autumn term only" })}>Info</Button>
+    </div>
+  );
+}
+
+interface StudentRow {
+  id: string;
+  name: string;
+  number: string;
+  section: string;
+  active: boolean;
+  classes: number;
+}
+
+const STUDENTS: StudentRow[] = [
+  { id: "1", name: "Hopper, Grace", number: "STU-0003", section: "7A", active: true, classes: 6 },
+  { id: "2", name: "Johnson, Katherine", number: "STU-0011", section: "7A", active: true, classes: 6 },
+  { id: "3", name: "Lovelace, Ada", number: "STU-0001", section: "7B", active: true, classes: 5 },
+  { id: "4", name: "Turing, Alan", number: "STU-0007", section: "7B", active: false, classes: 0 },
+  { id: "5", name: "Hamilton, Margaret", number: "STU-0014", section: "8A", active: true, classes: 7 },
+  { id: "6", name: "Shannon, Claude", number: "STU-0009", section: "8A", active: true, classes: 7 },
+  { id: "7", name: "Liskov, Barbara", number: "STU-0016", section: "8A", active: true, classes: 7 },
+];
+const PAGE = 5;
+
+function TableSample() {
+  const [sort, setSort] = useState<SortDescriptor>({ column: "name", direction: "ascending" });
+  const [offset, setOffset] = useState(0);
+  const [mode, setMode] = useState<"rows" | "empty" | "loading">("rows");
+
+  const sorted = [...STUDENTS].sort((a, b) => {
+    const key = sort.column as keyof StudentRow;
+    const cmp = String(a[key]).localeCompare(String(b[key]), undefined, { numeric: true });
+    return sort.direction === "descending" ? -cmp : cmp;
+  });
+  const rows = mode === "rows" ? sorted.slice(offset, offset + PAGE) : [];
+  // Placeholder rows while loading, so each skeleton bar sits in the column
+  // it stands in for.
+  const placeholders = Array.from({ length: 4 }, (_, i) => ({ id: `loading-${i}` }));
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        {(["rows", "empty", "loading"] as const).map((m) => (
+          <Button key={m} size="sm" variant={mode === m ? "secondary" : "quiet"} onPress={() => setMode(m)}>
+            {m === "rows" ? "With rows" : m === "empty" ? "Empty" : "Loading"}
+          </Button>
+        ))}
+      </div>
+      <TableFrame
+        footer={
+          mode !== "loading" && (
+          <Pagination
+            offset={offset}
+            limit={PAGE}
+            total={mode === "rows" ? STUDENTS.length : 0}
+            onChange={setOffset}
+            noun="students"
+          />
+          )
+        }
+      >
+        <div aria-busy={mode === "loading"}>
+          {mode === "loading" && <span className="sr-only">Loading students…</span>}
+          <Table aria-label="Students" sortDescriptor={sort} onSortChange={setSort}>
+            <TableHeader>
+              <Column id="name" isRowHeader allowsSorting>
+                Name
+              </Column>
+              <Column id="number" allowsSorting>
+                Student number
+              </Column>
+              <Column id="section" allowsSorting>
+                Section
+              </Column>
+              <Column id="active">Status</Column>
+              <Column id="classes" kind="number" allowsSorting>
+                Classes
+              </Column>
+            </TableHeader>
+            {mode === "loading" ? (
+              <TableBody items={placeholders}>
+                {(row) => (
+                  <Row id={row.id}>
+                    <Cell>
+                      <Skeleton className="h-4 w-36" />
+                    </Cell>
+                    <Cell>
+                      <Skeleton className="h-4 w-20" />
+                    </Cell>
+                    <Cell>
+                      <Skeleton className="h-4 w-8" />
+                    </Cell>
+                    <Cell>
+                      <Skeleton className="h-4 w-16" />
+                    </Cell>
+                    <Cell kind="number">
+                      <Skeleton className="ml-auto h-4 w-6" />
+                    </Cell>
+                  </Row>
+                )}
+              </TableBody>
+            ) : (
+              <TableBody
+                items={rows}
+                renderEmptyState={() => (
+                  <EmptyState
+                    title="No students in this section yet"
+                    description="Assign students to a section to enroll them in all of its classes."
+                    action={<Button variant="primary">Assign students</Button>}
+                  />
+                )}
+              >
+                {(row) => (
+                  <Row id={row.id}>
+                    <Cell>
+                      <span className="font-medium">{row.name}</span>
+                    </Cell>
+                    <Cell>
+                      <span className="font-mono text-small text-ink-2">{row.number}</span>
+                    </Cell>
+                    <Cell>{row.section}</Cell>
+                    <Cell>
+                      {/* Dot + neutral text, not a filled pill: pills get loud
+                          across many rows (dense-ui-craft). */}
+                      <span className="inline-flex items-center gap-2 text-small text-ink-2">
+                        <span aria-hidden="true" className={`size-2 rounded-full ${row.active ? "bg-ok" : "bg-line-strong"}`} />
+                        {row.active ? "Active" : "Withdrawn"}
+                      </span>
+                    </Cell>
+                    <Cell kind="number">{row.classes}</Cell>
+                  </Row>
+                )}
+              </TableBody>
+            )}
+          </Table>
+        </div>
+      </TableFrame>
+    </div>
+  );
+}
+
 /* --------------------------------------------------------------- context */
 
 const ASSESSMENTS = ["Quiz 1", "Quiz 2", "Test 1", "Project"];
@@ -323,57 +675,7 @@ function GradebookSample() {
           <span className="font-medium text-red-pen">2 ungraded</span> · class average{" "}
           <span className="font-mono">84%</span>
         </p>
-        <button
-          type="button"
-          className="inline-flex h-9 items-center rounded-md bg-accent px-4 text-small font-medium text-on-accent shadow-button transition-[background-color,transform] duration-150 ease-soft hover:bg-accent-hover active:scale-[0.96] pointer-coarse:h-11"
-        >
-          Add assessment
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Hand-authored 24×24 stroke icons (dense-ui-craft): same voice as the type,
-// no icon-library import. Shape carries the state too, so it never depends
-// on color alone.
-function AlertIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7.5v5.5" />
-      <path d="M12 16.5h.01" />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="size-5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M8 12.5l2.75 2.75L16 10" />
-    </svg>
-  );
-}
-
-function NoticeSample() {
-  return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      <div role="note" className="flex gap-3 rounded-lg bg-red-pen-tint p-4 text-red-pen">
-        <AlertIcon />
-        <div>
-          <p className="font-medium">Ms. Lovelace already teaches period 3 on Monday</p>
-          <p className="mt-1 text-small text-ink-2">
-            Pick another period, or move her 7B Science class first.
-          </p>
-        </div>
-      </div>
-      <div role="note" className="flex gap-3 rounded-lg bg-ok-tint p-4 text-ok">
-        <CheckIcon />
-        <div>
-          <p className="font-medium">Grace Hopper assigned to 7A</p>
-          <p className="mt-1 text-small text-ink-2">Enrolled in all 6 of 7A’s classes.</p>
-        </div>
+        <Button variant="primary">Add assessment</Button>
       </div>
     </div>
   );
