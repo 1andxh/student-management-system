@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# Intermediate output of npm run gen:api; only the generated .d.ts is committed.
+.openapi.json
