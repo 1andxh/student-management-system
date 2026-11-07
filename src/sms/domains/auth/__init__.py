@@ -7,17 +7,16 @@ authorization (see docs/adr/0006)."""
 from sms.domains.auth.dependencies import get_current_user, require_role
 from sms.domains.auth.exceptions import (
     InactiveUserError,
+    DisallowedOriginError,
     InvalidCredentialsError,
     InvalidRefreshTokenError,
 )
 from sms.domains.auth.models import Session
 from sms.domains.auth.repository import SessionRepository
 from sms.domains.auth.schemas import (
+    AccessTokenResponse,
     LoginRequest,
-    LogoutRequest,
     PinLoginRequest,
-    RefreshRequest,
-    TokenResponse,
 )
 from sms.domains.auth.service import AuthService
 
@@ -25,14 +24,13 @@ __all__ = [
     "get_current_user",
     "require_role",
     "InactiveUserError",
+    "DisallowedOriginError",
     "InvalidCredentialsError",
     "InvalidRefreshTokenError",
     "Session",
     "SessionRepository",
+    "AccessTokenResponse",
     "LoginRequest",
-    "LogoutRequest",
     "PinLoginRequest",
-    "RefreshRequest",
-    "TokenResponse",
     "AuthService",
 ]
