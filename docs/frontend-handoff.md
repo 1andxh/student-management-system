@@ -29,6 +29,13 @@ It refuses to run if the database already has grade levels, rather than half-see
 
 ## 1. Breaking changes
 
+### Refresh token moved to an HttpOnly cookie (ADR 0027)
+- `POST /auth/login` and `/auth/login-pin` return only `{access_token, token_type}`. The refresh token arrives as an `sms_refresh` cookie (HttpOnly, SameSite=Strict, Path=/auth, Secure). It's a **session cookie**, so closing the browser ends the login.
+- `POST /auth/refresh` and `/auth/logout` take **no body**. Call them with `credentials: "include"` so the browser sends the cookie, and send the login calls the same way so the browser stores it.
+- Keep the access token in memory only. On page load, call `/auth/refresh` to get a new one.
+- Refresh **rotates** the cookie. Two refreshes in flight at once means one gets a 401, so make refresh single-flight within a tab and serialize it across tabs (e.g. `navigator.locks`).
+- Refresh/logout from an origin not in `CORS_ORIGINS` get **403**. Two `sms_refresh` cookies in one request get **401**.
+
 ### `GET /enrollments` now self-scopes for students
 A `STUDENT` token previously saw **every enrollment in the school**. It now sees only its own. Passing another student's `student_id` is silently overridden with the caller's own — it does not error, it just returns their rows. `class_id` still narrows within their own enrollments.
 
