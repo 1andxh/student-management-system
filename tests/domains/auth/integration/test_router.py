@@ -72,8 +72,8 @@ async def test_post_login_pin_happy_path(
     body = response.json()
     assert body["access_token"]
     assert body["token_type"] == "bearer"
-    assert body["refresh_token"]
-    assert body["refresh_token"] != body["access_token"]
+    _assert_refresh_cookie_set(response)
+    assert "refresh_token" not in body
 
 
 async def test_post_login_pin_wrong_pin_returns_401(
@@ -129,8 +129,23 @@ async def test_post_login_happy_path(
     assert "access_token" in body
     assert body["access_token"]
     assert body["token_type"] == "bearer"
-    assert body["refresh_token"]
-    assert body["refresh_token"] != body["access_token"]
+    _assert_refresh_cookie_set(response)
+    assert response.cookies[REFRESH_COOKIE] != body["access_token"]
+
+
+async def test_post_login_does_not_expose_refresh_token_in_body(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # The whole point of the cookie (ADR 0027): if the raw token were also in
+    # the JSON body, page JavaScript — including injected script — could
+    # still read it, and the HttpOnly flag would protect nothing.
+    await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
+
+    response = await client.post(
+        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
+    )
+
+    assert "refresh_token" not in response.json()
 
 
 async def test_post_login_wrong_password_returns_401(
@@ -180,24 +195,29 @@ async def test_post_login_inactive_user_returns_401(
 async def test_post_refresh_happy_path(
     client: AsyncClient, make_user: Callable[..., Awaitable[User]]
 ) -> None:
-    await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
-    login_response = await client.post(
-        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
-    )
-    original_refresh_token = login_response.json()["refresh_token"]
+    await _login(client, make_user)
+    original_refresh_token = client.cookies[REFRESH_COOKIE]
 
-    response = await client.post("/auth/refresh", json={"refresh_token": original_refresh_token})
+    # No body: the browser (here, httpx's cookie jar) sends the cookie itself.
+    response = await client.post("/auth/refresh")
 
     assert response.status_code == 200
     body = response.json()
     assert body["access_token"]
-    assert body["refresh_token"]
-    assert body["refresh_token"] != original_refresh_token
+    assert "refresh_token" not in body
+    _assert_refresh_cookie_set(response)
+    assert response.cookies[REFRESH_COOKIE] != original_refresh_token
+
+
+async def test_post_refresh_without_cookie_returns_401(client: AsyncClient) -> None:
+    response = await client.post("/auth/refresh")
+
+    assert response.status_code == 401
 
 
 async def test_post_refresh_with_unknown_token_returns_401(client: AsyncClient) -> None:
     response = await client.post(
-        "/auth/refresh", json={"refresh_token": "this-token-was-never-issued"}
+        "/auth/refresh", headers=_cookie_header("this-token-was-never-issued")
     )
 
     assert response.status_code == 401
@@ -209,14 +229,12 @@ async def test_post_refresh_with_already_rotated_token_returns_401(
     # Proves rotation actually invalidates the old raw token over HTTP, not
     # just at the service layer — the first refresh below rotates the
     # session onto a new token, so re-presenting the original one must fail.
-    await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
-    login_response = await client.post(
-        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
-    )
-    original_refresh_token = login_response.json()["refresh_token"]
-    await client.post("/auth/refresh", json={"refresh_token": original_refresh_token})
+    await _login(client, make_user)
+    original_refresh_token = client.cookies[REFRESH_COOKIE]
+    await client.post("/auth/refresh")
 
-    response = await client.post("/auth/refresh", json={"refresh_token": original_refresh_token})
+    client.cookies.clear()
+    response = await client.post("/auth/refresh", headers=_cookie_header(original_refresh_token))
 
     assert response.status_code == 401
 
@@ -227,17 +245,13 @@ async def test_post_refresh_with_deactivated_user_returns_401(
     # A refresh token issued while the user was active must stop working
     # the moment the account is deactivated — refresh() re-checks the user,
     # not just the session, so this doesn't wait for the token to expire.
-    user = await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
-    login_response = await client.post(
-        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
-    )
-    refresh_token = login_response.json()["refresh_token"]
+    user = await _login(client, make_user)
 
     user.is_active = False
     db_session.add(user)
     await db_session.commit()
 
-    response = await client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    response = await client.post("/auth/refresh")
 
     assert response.status_code == 401
 
@@ -265,17 +279,16 @@ async def test_post_login_records_user_agent_and_ip(
 async def test_post_logout_happy_path(
     client: AsyncClient, make_user: Callable[..., Awaitable[User]]
 ) -> None:
-    await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
-    login_response = await client.post(
-        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
-    )
-    refresh_token = login_response.json()["refresh_token"]
+    await _login(client, make_user)
+    refresh_token = client.cookies[REFRESH_COOKIE]
 
-    logout_response = await client.post("/auth/logout", json={"refresh_token": refresh_token})
+    logout_response = await client.post("/auth/logout")
 
     assert logout_response.status_code == 204
+    _assert_refresh_cookie_cleared(logout_response)
 
-    refresh_response = await client.post("/auth/refresh", json={"refresh_token": refresh_token})
+    client.cookies.clear()
+    refresh_response = await client.post("/auth/refresh", headers=_cookie_header(refresh_token))
 
     assert refresh_response.status_code == 401
 
@@ -284,10 +297,128 @@ async def test_post_logout_with_unknown_token_returns_204(client: AsyncClient) -
     # Idempotent by design: logging out with an unknown/already-revoked
     # token is a no-op, not an error.
     response = await client.post(
-        "/auth/logout", json={"refresh_token": "this-token-was-never-issued"}
+        "/auth/logout", headers=_cookie_header("this-token-was-never-issued")
     )
 
     assert response.status_code == 204
+    _assert_refresh_cookie_cleared(response)
+
+
+async def test_post_logout_without_cookie_returns_204(client: AsyncClient) -> None:
+    # Same idempotency as an unknown token: "ensure no session is active
+    # here" is already true, so there is nothing to report as an error.
+    response = await client.post("/auth/logout")
+
+    assert response.status_code == 204
+
+
+async def test_cors_preflight_allows_credentials_for_frontend_origin(
+    client: AsyncClient,
+) -> None:
+    # Without Access-Control-Allow-Credentials the browser silently drops the
+    # Set-Cookie from a cross-origin login response, and never attaches the
+    # cookie to /auth/refresh — so the frontend can't log in at all.
+    response = await client.options(
+        "/auth/refresh",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-credentials"] == "true"
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
+async def test_post_refresh_from_frontend_origin_succeeds(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # The real SPA case: the browser sends Origin on every POST.
+    await _login(client, make_user)
+
+    response = await client.post("/auth/refresh", headers={"Origin": FRONTEND_ORIGIN})
+
+    assert response.status_code == 200
+
+
+async def test_post_refresh_from_disallowed_origin_returns_403_and_does_not_rotate(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # CSRF: the cookie is attached automatically, and CORS only hides the
+    # *response* from a disallowed origin — the request itself still runs.
+    # Another port on 127.0.0.1 counts as the same *site*, so SameSite
+    # doesn't stop it either. The Origin check is what does.
+    await _login(client, make_user)
+    refresh_token = client.cookies[REFRESH_COOKIE]
+
+    response = await client.post(
+        "/auth/refresh", headers={"Origin": "http://127.0.0.1:3000"}
+    )
+
+    assert response.status_code == 403
+    client.cookies.clear()
+    still_valid = await client.post("/auth/refresh", headers=_cookie_header(refresh_token))
+    assert still_valid.status_code == 200
+
+
+async def test_post_logout_from_disallowed_origin_returns_403_and_keeps_session(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    await _login(client, make_user)
+    refresh_token = client.cookies[REFRESH_COOKIE]
+
+    response = await client.post("/auth/logout", headers={"Origin": "http://127.0.0.1:3000"})
+
+    assert response.status_code == 403
+    client.cookies.clear()
+    still_valid = await client.post("/auth/refresh", headers=_cookie_header(refresh_token))
+    assert still_valid.status_code == 200
+
+
+async def test_post_refresh_with_duplicate_cookies_returns_401(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # Cookie tossing: a cookie planted at a broader path (or from a sibling
+    # subdomain) arrives *alongside* the real one, and the framework would
+    # silently keep the last. Two values means we can't know which session
+    # the caller means, so fail closed rather than guess.
+    await _login(client, make_user)
+    real_token = client.cookies[REFRESH_COOKIE]
+    client.cookies.clear()
+
+    # Real token last — the position the framework would pick — so this
+    # can only be a 401 because of the duplicate check, not because the
+    # planted value happens to be invalid.
+    response = await client.post(
+        "/auth/refresh",
+        headers={"Cookie": f"{REFRESH_COOKIE}=attacker-planted; {REFRESH_COOKIE}={real_token}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_post_refresh_failure_sets_no_cookie(client: AsyncClient) -> None:
+    response = await client.post(
+        "/auth/refresh", headers=_cookie_header("this-token-was-never-issued")
+    )
+
+    assert response.status_code == 401
+    assert response.headers.get_list("set-cookie") == []
+
+
+async def test_cors_preflight_from_disallowed_origin_gets_no_allow_origin(
+    client: AsyncClient,
+) -> None:
+    response = await client.options(
+        "/auth/refresh",
+        headers={
+            "Origin": "http://127.0.0.1:3000",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert "access-control-allow-origin" not in response.headers
 
 
 async def test_get_me_with_valid_token(
@@ -347,3 +478,57 @@ def _hashed(plaintext_password: str) -> dict[str, object]:
     from sms.core.security import hash_password
 
     return {"hashed_password": hash_password(plaintext_password)}
+
+
+REFRESH_COOKIE = "sms_refresh"
+FRONTEND_ORIGIN = "http://127.0.0.1:5173"
+
+
+async def _login(client: AsyncClient, make_user: Callable[..., Awaitable[User]]) -> User:
+    """Logs a fresh user in over HTTP, leaving the refresh cookie in the
+    client's cookie jar — the same state a browser is in after login."""
+    user = await make_user(email="ada@example.com", **_hashed("s3cr3t-pw"))
+    response = await client.post(
+        "/auth/login", json={"email": "ada@example.com", "password": "s3cr3t-pw"}
+    )
+    assert response.status_code == 200, response.text
+    return user
+
+
+def _cookie_header(refresh_token: str) -> dict[str, str]:
+    """Presents a specific refresh token, bypassing the cookie jar — for
+    replaying an old or made-up token. Callers clear the jar first so it
+    can't contribute a second, conflicting value."""
+    return {"Cookie": f"{REFRESH_COOKIE}={refresh_token}"}
+
+
+def _refresh_set_cookie(response) -> str:
+    headers = [
+        h for h in response.headers.get_list("set-cookie") if h.startswith(f"{REFRESH_COOKIE}=")
+    ]
+    assert len(headers) == 1, response.headers.get_list("set-cookie")
+    return headers[0].lower()
+
+
+def _assert_refresh_cookie_set(response) -> None:
+    """Each attribute is load-bearing, so each is asserted: HttpOnly keeps
+    it away from page JavaScript, SameSite=Strict keeps other sites from
+    making the browser send it, Path=/auth keeps it off every other API
+    request, Secure keeps it off plain http. And it has *no* Max-Age or
+    Expires: it is a session cookie, so closing the browser ends the login
+    on a shared computer (ADR 0027) — the server's own 30-day absolute
+    expiry (ADR 0009) still applies on top."""
+    header = _refresh_set_cookie(response)
+    assert response.cookies[REFRESH_COOKIE]
+    assert "httponly" in header
+    assert "samesite=strict" in header
+    assert "path=/auth" in header
+    assert "secure" in header
+    assert "max-age" not in header
+    assert "expires" not in header
+
+
+def _assert_refresh_cookie_cleared(response) -> None:
+    header = _refresh_set_cookie(response)
+    assert "max-age=0" in header
+    assert "path=/auth" in header
