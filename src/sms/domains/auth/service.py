@@ -12,7 +12,7 @@ from sms.core.security import (
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
 from sms.domains.auth.models import Session
 from sms.domains.auth.repository import SessionRepository
-from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenResponse
+from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenPair
 from sms.domains.students.repository import StudentRepository
 from sms.domains.users.models import User, UserRole
 from sms.domains.users.repository import UserRepository
@@ -42,7 +42,7 @@ class AuthService:
         data: LoginRequest,
         user_agent: str | None = None,
         ip_address: str | None = None,
-    ) -> TokenResponse:
+    ) -> TokenPair:
         user = await self._users.get_by_email(data.email)
 
         # Always verify against *some* hash, even for a nonexistent email,
@@ -57,14 +57,14 @@ class AuthService:
 
         access_token = create_access_token(user.id)
         refresh_token = await self._issue_session(user, user_agent, ip_address)
-        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+        return TokenPair(access_token=access_token, refresh_token=refresh_token)
 
     async def login_with_pin(
         self,
         data: PinLoginRequest,
         user_agent: str | None = None,
         ip_address: str | None = None,
-    ) -> TokenResponse:
+    ) -> TokenPair:
         student = await self._students.get_by_student_number(data.student_number)
 
         # Always look up a user, on every branch — a random nonexistent id
@@ -102,14 +102,14 @@ class AuthService:
 
         access_token = create_access_token(user.id)
         refresh_token = await self._issue_session(user, user_agent, ip_address)
-        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+        return TokenPair(access_token=access_token, refresh_token=refresh_token)
 
     async def refresh(
         self,
         raw_refresh_token: str,
         user_agent: str | None = None,
         ip_address: str | None = None,
-    ) -> TokenResponse:
+    ) -> TokenPair:
         session = await self._sessions.get_by_token_hash(hash_token(raw_refresh_token))
 
         now = datetime.now(timezone.utc)
@@ -130,7 +130,7 @@ class AuthService:
 
         access_token = create_access_token(user.id)
         new_refresh_token = await self._rotate_session(session, user_agent, ip_address)
-        return TokenResponse(access_token=access_token, refresh_token=new_refresh_token)
+        return TokenPair(access_token=access_token, refresh_token=new_refresh_token)
 
     async def logout(self, raw_refresh_token: str) -> None:
         session = await self._sessions.get_by_token_hash(hash_token(raw_refresh_token))
