@@ -65,3 +65,30 @@ abstraction, DB session) lives in `src/sms/core/` and `src/sms/db/`.
 `src/sms/api/router.py` aggregates every domain's router so
 `src/sms/main.py` stays a thin entrypoint that never grows with the domain
 count.
+
+## Frontend (`web/`)
+
+A Vite + React + TypeScript single-page app in `web/`, in the same repo as
+the API (the backend stays at the root). Stack and layout rationale:
+`docs/adr/0028`.
+
+```sh
+cd web
+npm install
+npm run dev        # http://127.0.0.1:5173 — expects the API on 127.0.0.1:8001
+```
+
+Use `127.0.0.1`, not `localhost`: the API's CORS allowlist and the refresh
+cookie are tied to that exact origin. `--strictPort` is deliberate: if 5173
+is taken, Vite fails instead of quietly moving to 5174, an origin the API
+would reject.
+
+Other scripts: `npm run typecheck`, `npm run lint`, `npm test`,
+`npm run build`.
+
+**API types are generated, not hand-written.** After any backend change
+that touches a route or schema, run `npm run gen:api` (from `web/`) and
+commit the updated `src/lib/api-schema.d.ts`. It dumps the OpenAPI schema
+straight from the FastAPI app (`sms.scripts.dump_openapi`), so it needs `uv`
+and a valid `.env`, but no running server or database. CI fails if the
+committed file is stale.
