@@ -1,6 +1,8 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
 
+import { Toaster } from "../components/ui/toast";
+
 // Router context: what every route's loader/beforeLoad can reach without
 // importing a singleton. F3 adds the auth session here, which is what the
 // role guards (beforeLoad) will read.
@@ -9,5 +11,12 @@ export interface RouterContext {
 }
 
 export const Route = createRootRouteWithContext<RouterContext>()({
-  component: () => <Outlet />,
+  component: () => (
+    <>
+      <Outlet />
+      {/* One toast region for the whole app, outside any page, so a toast
+          raised just before navigating still shows on the next page. */}
+      <Toaster />
+    </>
+  ),
 });
