@@ -33,11 +33,19 @@ def create_app() -> FastAPI:
     # why); expose_headers is required for the frontend's paginated list
     # views to read X-Total-Count at all, since browsers hide non-safelisted
     # response headers from JS by default even on a successful request.
+    # allow_credentials is what lets the refresh-token cookie work across
+    # origins (docs/adr/0027): without it the browser drops the login
+    # response's Set-Cookie and never attaches the cookie to /auth/refresh.
+    # It is only safe because allow_origins is an explicit list, which
+    # Settings enforces (a "*" fails startup).
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173"],
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
         allow_methods=["*"],
-        allow_headers=["*"],
+        # Only what the SPA actually sends; a new custom header has to be
+        # added here deliberately.
+        allow_headers=["Authorization", "Content-Type"],
         expose_headers=["X-Total-Count"],
     )
     app.include_router(api_router)
