@@ -40,6 +40,13 @@ export function closeToast(key: string) {
   queue.close(key);
 }
 
+/** Drops every toast. The queue is a module-level singleton, so it outlives
+ *  any one render: tests reset it between cases (src/test/setup.ts), or one
+ *  test's error toast — which never times out — shows up in the next. */
+export function clearToasts() {
+  queue.clear();
+}
+
 const toneStyles: Record<ToastTone, { icon: React.ReactNode; className: string }> = {
   success: { icon: <CheckCircleIcon className="size-5" />, className: "text-ok" },
   error: { icon: <AlertCircleIcon className="size-5" />, className: "text-red-pen" },
