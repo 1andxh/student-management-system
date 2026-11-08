@@ -20,3 +20,6 @@ THINKING.md
 
 # Local Claude Code session state, not project source
 .claude/
+
+# Local dev/demo logins for reviewing the frontend. Never commit.
+creds.md
