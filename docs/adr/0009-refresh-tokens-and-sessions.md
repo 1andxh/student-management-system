@@ -1,7 +1,7 @@
 # 0009. Refresh tokens and sessions
 
 ## Status
-Accepted. Token *transport* superseded by ADR 0027: the refresh token now travels only in an HttpOnly session cookie, never in a JSON body. Sessions, rotation, absolute expiry and uniform errors below still stand.
+Accepted. Token *transport* superseded by ADR 0027: the refresh token now travels only in an HttpOnly session cookie, never in a JSON body. Sessions, rotation, absolute expiry and uniform errors below still stand. Rotation is amended by ADR 0031: successors are now deterministic (an HMAC of the current token) rather than random, the previous token can be replayed within a short grace window, and logout's rate limit is 120/minute rather than 20.
 
 ## Context
 ADR 0008's Finding 4 flagged that access tokens have no server-side revocation — a compromised token, or a user who wants to log out, has no way to invalidate a token before it naturally expires. The user raised this directly as a follow-up, proposing a refresh-token/session mechanism and asking specifically whether a separate orchestrating class between auth/session/refresh made sense, and whether `user_agent`/`ip_address` belonged on the session record.
