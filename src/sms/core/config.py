@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
+    # How long a just-rotated refresh token keeps working (docs/adr/0031).
+    # Rotation on every refresh (ADR 0009) means a browser that loses the
+    # response carrying the new cookie (a second reload aborting the first,
+    # navigating mid-load, a dropped connection after the server committed)
+    # is left holding a dead token: logged out. This window lets the
+    # previous token refresh once more. Anchored to the rotation that
+    # retired it, so it can't be extended by use.
+    refresh_grace_seconds: int = 30
     # The refresh-token cookie's Secure flag (docs/adr/0027). Defaults to
     # True — fail-closed, same posture as the JWT secret check below — so a
     # deployment that forgets to set it never sends the token over plain
@@ -54,6 +62,16 @@ class Settings(BaseSettings):
         # credentialed origin. Fail startup instead.
         if "*" in value:
             raise ValueError("CORS_ORIGINS may not contain '*' (credentials are enabled).")
+        return value
+
+    @field_validator("refresh_grace_seconds")
+    @classmethod
+    def _bound_grace_window(cls, value: int) -> int:
+        # The window bounds how long a retired refresh token keeps working
+        # (docs/adr/0031). Aborted reloads need about a second; a large value
+        # would quietly undo rotation. Fail startup instead.
+        if not 0 <= value <= 120:
+            raise ValueError("REFRESH_GRACE_SECONDS must be between 0 and 120.")
         return value
 
     @model_validator(mode="after")

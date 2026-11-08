@@ -29,3 +29,12 @@ def test_insecure_refresh_cookie_allowed_locally() -> None:
     settings = Settings(**_REQUIRED, env="local", refresh_cookie_secure=False)
 
     assert settings.refresh_cookie_secure is False
+
+
+@pytest.mark.parametrize("seconds", [-1, 121])
+def test_refresh_grace_seconds_is_bounded(seconds: int) -> None:
+    # The grace window bounds how long a retired refresh token keeps working
+    # (ADR 0031). A large value quietly undoes rotation, so a misconfigured
+    # one fails startup instead.
+    with pytest.raises(ValidationError, match="REFRESH_GRACE_SECONDS"):
+        Settings(**_REQUIRED, refresh_grace_seconds=seconds)

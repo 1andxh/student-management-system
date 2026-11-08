@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from sms.core.config import settings
 from sms.core.security import (
+    derive_successor_token,
     DUMMY_PASSWORD_HASH,
     create_access_token,
     generate_refresh_token,
@@ -110,34 +111,80 @@ class AuthService:
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> TokenPair:
-        session = await self._sessions.get_by_token_hash(hash_token(raw_refresh_token))
+        presented = hash_token(raw_refresh_token)
+        # Deterministic (docs/adr/0031): every refresh with this token, and
+        # every replay of it, computes the same next token.
+        successor = derive_successor_token(raw_refresh_token)
+        successor_hash = hash_token(successor)
 
-        now = datetime.now(timezone.utc)
-        # Same error for "no such token", "expired", and "revoked" —
-        # distinguishing them would leak session state. See docs/adr/0008's
-        # login-oracle fix, applied here for the same reason.
-        if session is None or session.revoked_at is not None or session.expires_at < now:
-            raise InvalidRefreshTokenError()
+        # Two attempts, not one: a reload can abort a refresh in the browser
+        # while the server is still processing it, so the next page's
+        # refresh arrives with the same token. It may read that token as
+        # *current*, then lose the compare-and-swap to the first request.
+        # Re-reading then finds it in the grace slot, already rotated to the
+        # very successor this request would have produced.
+        for _ in range(2):
+            now = datetime.now(timezone.utc)
+            session = await self._sessions.get_for_refresh(
+                presented, now - timedelta(seconds=settings.refresh_grace_seconds)
+            )
 
-        # Re-check the account, not just the session — without this, a
-        # deactivated user's still-valid refresh token would keep minting
-        # access tokens, and the fact that refresh "succeeds then everything
-        # else fails" vs. "session revoked, refresh fails immediately" is
-        # itself an oracle leaking account state. Same error either way.
-        user = await self._users.get(session.user_id)
-        if user is None or not user.is_active:
-            raise InvalidRefreshTokenError()
+            # Same error for "no such token", "past its grace window",
+            # "expired" and "revoked" — distinguishing them would leak
+            # session state. See docs/adr/0008's login-oracle fix.
+            if session is None or session.revoked_at is not None or session.expires_at < now:
+                raise InvalidRefreshTokenError()
 
-        access_token = create_access_token(user.id)
-        new_refresh_token = await self._rotate_session(session, user_agent, ip_address)
-        return TokenPair(access_token=access_token, refresh_token=new_refresh_token)
+            # Re-check the account, not just the session — without this, a
+            # deactivated user's still-valid refresh token would keep minting
+            # access tokens, and "refresh succeeds then everything else
+            # fails" vs. "refresh fails" would itself leak account state.
+            user = await self._users.get(session.user_id)
+            if user is None or not user.is_active:
+                raise InvalidRefreshTokenError()
+
+            if session.refresh_token_hash == presented:
+                # Normal rotation: the presented token becomes the previous
+                # one, and its grace window starts now.
+                rotated = await self._sessions.rotate(
+                    session.id,
+                    presented,
+                    successor_hash,
+                    presented,
+                    now,
+                    now,
+                    user_agent=user_agent,
+                    ip_address=ip_address,
+                )
+                if not rotated:
+                    continue  # a concurrent request moved it first; re-read
+            elif session.refresh_token_hash != successor_hash:
+                # The previous token, but the session has since moved past
+                # its successor: this replay can't be honoured.
+                raise InvalidRefreshTokenError()
+            # else: a replay of the previous token within its window. Its
+            # successor is already current, so answer with it and write
+            # nothing — no second token minted, nothing retired, and the
+            # window stays anchored to the original rotation by construction.
+
+            return TokenPair(access_token=create_access_token(user.id), refresh_token=successor)
+
+        # Lost the race twice: something else (a logout, more concurrent
+        # refreshes) keeps moving the session. Treat as any invalid token.
+        raise InvalidRefreshTokenError()
 
     async def logout(self, raw_refresh_token: str) -> None:
-        session = await self._sessions.get_by_token_hash(hash_token(raw_refresh_token))
+        # Honours the grace slot too: a browser that lost a rotation response
+        # holds the *previous* token, and logging out with it must still end
+        # the session — not leave it alive under a token nobody has.
+        now = datetime.now(timezone.utc)
+        session = await self._sessions.get_for_refresh(
+            hash_token(raw_refresh_token), now - timedelta(seconds=settings.refresh_grace_seconds)
+        )
         if session is None or session.revoked_at is not None:
             return  # Idempotent — an unknown or already-revoked token is not an error.
 
-        session.revoked_at = datetime.now(timezone.utc)
+        session.revoked_at = now
         await self._sessions.add(session)
 
     async def _issue_session(
@@ -154,22 +201,4 @@ class AuthService:
             ip_address=ip_address,
         )
         await self._sessions.add(session)
-        return raw_token
-
-    async def _rotate_session(
-        self, session: Session, user_agent: str | None, ip_address: str | None
-    ) -> str:
-        raw_token = generate_refresh_token()
-        now = datetime.now(timezone.utc)
-        rotated = await self._sessions.rotate(
-            session.refresh_token_hash,
-            hash_token(raw_token),
-            now,
-            user_agent=user_agent,
-            ip_address=ip_address,
-        )
-        if not rotated:
-            # Someone else (a concurrent refresh, or a logout) won the race
-            # for this session between our validation check above and now.
-            raise InvalidRefreshTokenError()
         return raw_token

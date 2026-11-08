@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from sms.core.repository import AbstractRepository
-from sms.core.security import hash_password, hash_token
+from sms.core.security import derive_successor_token, hash_password, hash_token
 from sms.domains.auth.exceptions import InvalidCredentialsError, InvalidRefreshTokenError
 from sms.domains.auth.models import Session
 from sms.domains.auth.schemas import LoginRequest, PinLoginRequest, TokenPair
@@ -94,7 +94,7 @@ class FakeUserRepository(AbstractRepository[User]):
 class FakeSessionRepository(AbstractRepository[Session]):
     """In-memory stand-in for SessionRepository, backed by a plain dict —
     same style as FakeUserRepository above. Adds the domain-specific
-    get_by_token_hash lookup so AuthService.refresh/logout can be unit
+    get_for_refresh lookup so AuthService.refresh/logout can be unit
     tested without a database. Entities are stored by reference, so tests
     can mutate a fetched Session (e.g. expires_at, revoked_at) in place to
     set up expired/revoked scenarios without a separate update method."""
@@ -117,27 +117,38 @@ class FakeSessionRepository(AbstractRepository[Session]):
     async def remove(self, entity: Session) -> None:
         self._sessions.pop(entity.id, None)
 
-    async def get_by_token_hash(self, refresh_token_hash: str) -> Session | None:
+    async def get_for_refresh(self, token_hash: str, grace_cutoff: datetime) -> Session | None:
         for session in self._sessions.values():
-            if session.refresh_token_hash == refresh_token_hash:
+            if session.refresh_token_hash == token_hash:
+                return session
+            if (
+                session.previous_refresh_token_hash == token_hash
+                and session.rotated_at is not None
+                and session.rotated_at > grace_cutoff
+            ):
                 return session
         return None
 
     async def rotate(
         self,
-        old_hash: str,
+        session_id: UUID,
+        expected_current_hash: str,
         new_hash: str,
+        previous_hash: str | None,
+        rotated_at: datetime | None,
         now: datetime,
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> bool:
-        # Not truly atomic (no concurrency in these tests), but matches
-        # the real SessionRepository.rotate's contract: fails if old_hash
-        # no longer matches a non-revoked session.
-        session = await self.get_by_token_hash(old_hash)
-        if session is None or session.revoked_at is not None:
+        # Not truly atomic (no real concurrency here), but the same contract
+        # as SessionRepository.rotate: a compare-and-swap on the current
+        # hash, failing if the session moved on or was revoked.
+        session = self._sessions.get(session_id)
+        if session is None or session.revoked_at is not None or session.refresh_token_hash != expected_current_hash:
             return False
         session.refresh_token_hash = new_hash
+        session.previous_refresh_token_hash = previous_hash
+        session.rotated_at = rotated_at
         session.last_used_at = now
         session.user_agent = user_agent
         session.ip_address = ip_address
@@ -245,19 +256,73 @@ async def test_refresh_with_valid_token_returns_new_token_response(
     assert refreshed.refresh_token
 
 
-async def test_refresh_rotates_old_token_stops_working(
-    service: AuthService, repository: FakeUserRepository
+async def test_refresh_retries_once_when_a_concurrent_rotation_wins(
+    service: AuthService, repository: FakeUserRepository, session_repository: FakeSessionRepository
+) -> None:
+    # A reload aborts a refresh in the browser, but the server may still be
+    # processing it when the next page's refresh arrives with the same
+    # token. The second request reads that token as *current*, then loses
+    # the compare-and-swap to the first. One re-read finds it in the grace
+    # slot, and the refresh succeeds instead of logging the user out.
+    # (Not reproducible over HTTP deterministically; the fake injects the
+    # interleaving.)
+    await repository.add(make_user(email="ada@example.com"))
+    login = await service.login(LoginRequest(email="ada@example.com", password="correct-horse"))
+    presented = hash_token(login.refresh_token)
+
+    real_rotate = session_repository.rotate
+    # The rival is a real refresh of the same token, so it rotates to the
+    # same deterministic successor this request would have.
+    rival_hash = hash_token(derive_successor_token(login.refresh_token))
+
+    async def rotate_after_a_rival_wins(session_id: UUID, expected_current_hash: str, *args: object, **kwargs: object) -> bool:
+        session_repository.rotate = real_rotate  # only the first attempt races
+        await real_rotate(
+            session_id, expected_current_hash, rival_hash, expected_current_hash, datetime.now(timezone.utc), datetime.now(timezone.utc)
+        )
+        return False
+
+    session_repository.rotate = rotate_after_a_rival_wins  # type: ignore[method-assign]
+
+    result = await service.refresh(login.refresh_token)
+
+    session = (await session_repository.list())[0]
+    assert result.refresh_token == derive_successor_token(login.refresh_token)
+    assert session.refresh_token_hash == hash_token(result.refresh_token)
+    assert session.previous_refresh_token_hash == presented
+
+
+async def test_a_late_grace_refresh_does_not_evict_the_live_token(
+    service: AuthService, repository: FakeUserRepository, session_repository: FakeSessionRepository
+) -> None:
+    # The other ordering of the rapid-reload race (security review F3 #2).
+    # Reload #1's refresh was aborted in the browser but is still running on
+    # the server; reload #2's refresh (same token) completes first, and its
+    # new cookie is what the browser keeps. #1 then finishes via the grace
+    # path. With a random next token that rotated the session *again* and
+    # retired the token the browser actually holds (signed out). With a
+    # deterministic one, #1 gets the very same next token and writes
+    # nothing, so the browser's token stays current.
+    await repository.add(make_user(email="ada@example.com"))
+    login = await service.login(LoginRequest(email="ada@example.com", password="correct-horse"))
+
+    kept_by_browser = await service.refresh(login.refresh_token)  # reload #2, wins
+    await service.refresh(login.refresh_token)  # reload #1, late, response discarded
+
+    await service.refresh(kept_by_browser.refresh_token)  # the user's next refresh
+
+
+async def test_refresh_with_old_token_after_grace_raises(
+    service: AuthService, repository: FakeUserRepository, session_repository: FakeSessionRepository
 ) -> None:
     await repository.add(make_user(email="ada@example.com"))
-    login_result = await service.login(
-        LoginRequest(email="ada@example.com", password="correct-horse")
-    )
-    old_refresh_token = login_result.refresh_token
-
-    await service.refresh(old_refresh_token)
+    login = await service.login(LoginRequest(email="ada@example.com", password="correct-horse"))
+    await service.refresh(login.refresh_token)
+    session = (await session_repository.list())[0]
+    session.rotated_at = datetime.now(timezone.utc) - timedelta(seconds=31)
 
     with pytest.raises(InvalidRefreshTokenError):
-        await service.refresh(old_refresh_token)
+        await service.refresh(login.refresh_token)
 
 
 async def test_refresh_with_unknown_token_raises(service: AuthService) -> None:
@@ -274,7 +339,7 @@ async def test_refresh_with_expired_session_raises(
     login_result = await service.login(
         LoginRequest(email="ada@example.com", password="correct-horse")
     )
-    session = await session_repository.get_by_token_hash(hash_token(login_result.refresh_token))
+    session = await session_repository.get_for_refresh(hash_token(login_result.refresh_token), datetime.now(timezone.utc))
     assert session is not None
     session.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
 
@@ -291,7 +356,7 @@ async def test_refresh_with_revoked_session_raises(
     login_result = await service.login(
         LoginRequest(email="ada@example.com", password="correct-horse")
     )
-    session = await session_repository.get_by_token_hash(hash_token(login_result.refresh_token))
+    session = await session_repository.get_for_refresh(hash_token(login_result.refresh_token), datetime.now(timezone.utc))
     assert session is not None
     session.revoked_at = datetime.now(timezone.utc)
 

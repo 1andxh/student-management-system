@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,7 +19,10 @@ class Session(Base):
     class itself; see docs/adr/0012 for why auth and users are split."""
 
     __tablename__ = "sessions"
-    __table_args__ = (UniqueConstraint("refresh_token_hash", name="uq_sessions_refresh_token_hash"),)
+    __table_args__ = (
+        UniqueConstraint("refresh_token_hash", name="uq_sessions_refresh_token_hash"),
+        Index("ix_sessions_previous_refresh_token_hash", "previous_refresh_token_hash"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -30,6 +33,12 @@ class Session(Base):
     # SHA-256 hex digest of the raw opaque token — the raw value is only
     # ever returned to the client once, at issuance/rotation, never stored.
     refresh_token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # The token the current one replaced, and when — the grace window
+    # (docs/adr/0031): a refresh presenting the previous token within
+    # settings.refresh_grace_seconds of rotated_at still succeeds. Not
+    # unique: it's only ever matched together with the time check.
+    previous_refresh_token_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime] = mapped_column(

@@ -5,7 +5,7 @@ from uuid import UUID
 import jwt
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sms.core.config import settings
@@ -223,19 +223,105 @@ async def test_post_refresh_with_unknown_token_returns_401(client: AsyncClient) 
     assert response.status_code == 401
 
 
-async def test_post_refresh_with_already_rotated_token_returns_401(
+async def test_post_refresh_with_previous_token_within_grace_succeeds(
     client: AsyncClient, make_user: Callable[..., Awaitable[User]]
 ) -> None:
-    # Proves rotation actually invalidates the old raw token over HTTP, not
-    # just at the service layer — the first refresh below rotates the
-    # session onto a new token, so re-presenting the original one must fail.
+    # The double-reload case (ADR 0031): the server rotated, but the browser
+    # threw the response (and its new cookie) away, so it presents the token
+    # the server just replaced. Inside the grace window that must still work,
+    # and what it returns must be a token that works from then on.
     await _login(client, make_user)
-    original_refresh_token = client.cookies[REFRESH_COOKIE]
-    await client.post("/auth/refresh")
+    previous = client.cookies[REFRESH_COOKIE]
+    await client.post("/auth/refresh")  # rotates; this response is "lost"
 
     client.cookies.clear()
-    response = await client.post("/auth/refresh", headers=_cookie_header(original_refresh_token))
+    response = await client.post("/auth/refresh", headers=_cookie_header(previous))
 
+    assert response.status_code == 200
+    _assert_refresh_cookie_set(response)
+    client.cookies.clear()
+    follow_up = await client.post("/auth/refresh", headers=_cookie_header(response.cookies[REFRESH_COOKIE]))
+    assert follow_up.status_code == 200
+
+
+async def test_replaying_the_previous_token_returns_the_same_next_token(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # Deterministic rotation (ADR 0031): a replay doesn't mint a *second*
+    # successor that would retire the first — it gets the same one back.
+    await _login(client, make_user)
+    previous = client.cookies[REFRESH_COOKIE]
+    first = await client.post("/auth/refresh")
+    next_token = first.cookies[REFRESH_COOKIE]
+
+    client.cookies.clear()
+    replay = await client.post("/auth/refresh", headers=_cookie_header(previous))
+
+    assert replay.status_code == 200
+    assert replay.cookies[REFRESH_COOKIE] == next_token
+
+
+async def test_post_logout_is_limited_generously(client: AsyncClient) -> None:
+    # 120/minute, not the login routes' 5 or refresh's 20: logout can only
+    # end sessions, and a school behind one IP must be able to sign a whole
+    # class out at a bell without anyone hitting the limit (security review
+    # F3 #1). Still limited, to blunt a flood.
+    for _ in range(120):
+        assert (await client.post("/auth/logout")).status_code == 204
+
+    assert (await client.post("/auth/logout")).status_code == 429
+
+
+async def test_post_refresh_with_previous_token_after_grace_returns_401(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]], db_session: AsyncSession
+) -> None:
+    # Rotation still invalidates the old token over HTTP (ADR 0009) — once
+    # the grace window has passed.
+    await _login(client, make_user)
+    previous = client.cookies[REFRESH_COOKIE]
+    await client.post("/auth/refresh")
+    await _age_last_rotation(db_session, seconds=settings.refresh_grace_seconds + 1)
+
+    client.cookies.clear()
+    response = await client.post("/auth/refresh", headers=_cookie_header(previous))
+
+    assert response.status_code == 401
+
+
+async def test_grace_use_does_not_extend_the_window(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]], db_session: AsyncSession
+) -> None:
+    # The window is anchored to the rotation that retired the token. If
+    # using the previous token moved it, a stolen previous token could keep
+    # itself alive indefinitely by refreshing every 29 seconds.
+    await _login(client, make_user)
+    previous = client.cookies[REFRESH_COOKIE]
+    await client.post("/auth/refresh")
+    rotated_at_before = await _rotated_at(db_session)
+
+    client.cookies.clear()
+    response = await client.post("/auth/refresh", headers=_cookie_header(previous))
+
+    assert response.status_code == 200
+    assert await _rotated_at(db_session) == rotated_at_before
+
+
+async def test_post_logout_with_previous_token_within_grace_revokes_session(
+    client: AsyncClient, make_user: Callable[..., Awaitable[User]]
+) -> None:
+    # Logging out with the cookie the browser actually holds (the "lost
+    # response" one) must end the session, not silently leave it alive
+    # under a token nobody has.
+    await _login(client, make_user)
+    previous = client.cookies[REFRESH_COOKIE]
+    await client.post("/auth/refresh")
+    current = client.cookies[REFRESH_COOKIE]
+
+    client.cookies.clear()
+    logout = await client.post("/auth/logout", headers=_cookie_header(previous))
+    assert logout.status_code == 204
+
+    response = await client.post("/auth/refresh", headers=_cookie_header(current))
     assert response.status_code == 401
 
 
@@ -532,3 +618,19 @@ def _assert_refresh_cookie_cleared(response) -> None:
     header = _refresh_set_cookie(response)
     assert "max-age=0" in header
     assert "path=/auth" in header
+
+
+async def _age_last_rotation(db_session: AsyncSession, seconds: int) -> None:
+    """Moves every session's last rotation into the past: the grace window
+    tested without sleeping through it."""
+    await db_session.execute(
+        update(Session).values(rotated_at=datetime.now(timezone.utc) - timedelta(seconds=seconds))
+    )
+    await db_session.commit()
+
+
+async def _rotated_at(db_session: AsyncSession) -> datetime | None:
+    result = await db_session.execute(
+        select(Session.rotated_at).order_by(Session.created_at.desc()).execution_options(populate_existing=True)
+    )
+    return result.scalars().first()

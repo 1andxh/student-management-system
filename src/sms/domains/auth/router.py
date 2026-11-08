@@ -160,7 +160,11 @@ async def refresh(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(_require_allowed_origin)],
 )
-@limiter.limit("20/minute")
+# Generous on purpose (security review F3 #1): logout can only end sessions,
+# and refresh tokens can't be guessed, so a tight limit protects little —
+# while at a school behind one IP, a class signing out at the bell could hit
+# 20/minute, and a rejected logout leaves the session alive in that browser.
+@limiter.limit("120/minute")
 async def logout(
     request: Request,
     response: Response,

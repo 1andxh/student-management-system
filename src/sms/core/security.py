@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -65,3 +67,32 @@ def hash_token(raw_token: str) -> str:
     bits of entropy from generate_refresh_token, so a slow KDF (meant for
     low-entropy human passwords) buys no security here, only latency."""
     return hashlib.sha256(raw_token.encode()).hexdigest()
+
+
+# Domain separation: the JWT secret also signs access tokens (HS256 over
+# "header.payload"), so derivations made with it are labelled and can never
+# collide with, or stand in for, a JWT signature.
+_ROTATION_LABEL = b"sms/refresh-rotation/v1\x00"
+
+
+def derive_successor_token(raw_token: str) -> str:
+    """The refresh token that replaces `raw_token` on rotation: an HMAC of
+    it under a server secret, so it is unpredictable without the secret but
+    the *same* every time (docs/adr/0031).
+
+    That determinism is what makes rotation safe to replay: a reload's
+    aborted refresh still running on the server and the new page's refresh
+    both compute the same next token, so whichever finishes last can't
+    retire the cookie the browser actually kept. With a random successor,
+    each replay minted a different one and the last writer won.
+
+    Keyed from JWT_SECRET_KEY (decided over a separate secret, to avoid
+    another env var): anyone holding that secret can already mint access
+    tokens, so deriving refresh successors from it adds no new exposure.
+    Rotating JWT_SECRET_KEY ends every session's chain, as it already ends
+    every access token. Same shape as generate_refresh_token: 256 bits,
+    base64url, no padding."""
+    digest = hmac.new(
+        settings.jwt_secret_key.encode(), _ROTATION_LABEL + raw_token.encode(), hashlib.sha256
+    ).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
