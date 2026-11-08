@@ -14,15 +14,18 @@ export interface TextFieldProps extends Omit<AriaTextFieldProps, "className" | "
   errorMessage?: string | ((validation: ValidationResult) => string);
   /** An example of the expected format, ending with "…" (e.g. "STU-0001…"). */
   placeholder?: string;
+  /** Phone keyboards capitalize the first letter by default; IDs like
+   *  "STU-0001" want "characters", emails/codes want "off". */
+  autoCapitalize?: "off" | "none" | "on" | "sentences" | "words" | "characters";
   /** Layout only. */
   className?: string;
 }
 
-export function TextField({ label, description, errorMessage, placeholder, className = "", ...props }: TextFieldProps) {
+export function TextField({ label, description, errorMessage, placeholder, autoCapitalize, className = "", ...props }: TextFieldProps) {
   return (
     <AriaTextField {...props} className={`flex flex-col gap-1.5 ${className}`}>
       <Label>{label}</Label>
-      <Input placeholder={placeholder} className={controlStyles} />
+      <Input placeholder={placeholder} autoCapitalize={autoCapitalize} className={controlStyles} />
       {description && <Description>{description}</Description>}
       <FieldError>{errorMessage}</FieldError>
     </AriaTextField>
