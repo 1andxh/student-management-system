@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, notFound } from "@tanstack/react-router";
 import { useEffect, useLayoutEffect, useState } from "react";
 
 import type { SortDescriptor } from "react-aria-components";
@@ -15,6 +15,11 @@ import { TextField } from "../components/ui/text-field";
 import { toast } from "../components/ui/toast";
 
 export const Route = createFileRoute("/styleguide")({
+  // A development tool, not part of the product: absent from production
+  // builds' routing (it still ships in the bundle until code-split away).
+  beforeLoad: () => {
+    if (!import.meta.env.DEV) throw notFound();
+  },
   component: Styleguide,
 });
 

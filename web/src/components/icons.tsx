@@ -138,3 +138,20 @@ export function ChevronRightIcon(props: IconProps) {
     </Icon>
   );
 }
+
+export function MenuIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </Icon>
+  );
+}
+
+export function LogOutIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M14.5 4.5h3a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-3" />
+      <path d="M10 16.5L5.5 12 10 7.5M5.5 12h10" />
+    </Icon>
+  );
+}
